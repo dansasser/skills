@@ -320,8 +320,13 @@ def _renderer(a, budget, wfd, parent):
         except KeyboardInterrupt:
             code = 130
         except BaseException:
-            traceback.print_exc()
-            code = 1
+            # C-extension imports can wrap a stop exception in ImportError.
+            # The recorded stop remains authoritative; genuine errors stay visible.
+            if budget.interrupted:
+                code = 143
+            else:
+                traceback.print_exc()
+                code = 1
         finally:
             limits.stop_timer()
             outs.discard()

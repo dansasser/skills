@@ -697,6 +697,65 @@ def build():
             self.assertFalse(os.path.exists(prefix + ".pid"))
             self.assertFalse(os.path.exists(prefix + "_preview.png"))
 
+    def test_stop_during_numpy_datetime_import_is_clean(self):
+        # PyCapsule_Import can translate SystemExit from an interrupted datetime
+        # import into ImportError. Gate the real NumPy import at that boundary.
+        import signal
+        hooks = self.out("import-hooks")
+        os.makedirs(hooks)
+        with open(os.path.join(hooks, "sitecustomize.py"), "w") as stream:
+            stream.write("import os, time, builtins\n"
+                         "_original = builtins.__import__\n"
+                         "def _gate(name, *args, **kwargs):\n"
+                         "    if name == 'datetime':\n"
+                         "        with open(os.environ['MESHPAINT_DATETIME_GATE'], 'w') as f: f.write(str(os.getpid()))\n"
+                         "        while True: time.sleep(0.01)\n"
+                         "    return _original(name, *args, **kwargs)\n"
+                         "builtins.__import__ = _gate\n")
+        for signum, expected in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            with self.subTest(signal=signum):
+                ready = self.out(f"import-ready-{signum}")
+                prefix = self.out(f"import-stop-{signum}")
+                env = dict(os.environ, PYTHONPATH=hooks, MESHPAINT_DATETIME_GATE=ready)
+                p = subprocess.Popen([sys.executable, "-B", common.RUN, common.LIGHTHOUSE,
+                                      "--out", prefix, "--stage", "preview"],
+                                     env=env, cwd=self.tmp, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.PIPE, text=True, start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 20
+                    while not os.path.exists(ready) and p.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.005)
+                    self.assertTrue(os.path.exists(ready), "NumPy datetime import was not reached")
+                    p.send_signal(signum)
+                    err = p.communicate(timeout=45)[1]
+                finally:
+                    if p.poll() is None:
+                        os.killpg(p.pid, signal.SIGKILL)
+                        p.wait()
+                self.assertEqual(p.returncode, expected, err)
+                self.assertNotIn("Traceback", err)
+                self.assertEqual(self.usage(prefix)["result"], "interrupted")
+                self.assertFalse(os.path.exists(prefix + ".pid"))
+                self.assertFalse(os.path.exists(prefix + "_preview.png"))
+
+    def test_dependency_import_failure_remains_a_failure(self):
+        hooks = self.out("failed-import-hooks")
+        os.makedirs(hooks)
+        with open(os.path.join(hooks, "sitecustomize.py"), "w") as stream:
+            stream.write("import builtins\n"
+                         "_original = builtins.__import__\n"
+                         "def _fail(name, *args, **kwargs):\n"
+                         "    if name == 'numpy': raise ImportError('deliberate dependency import failure')\n"
+                         "    return _original(name, *args, **kwargs)\n"
+                         "builtins.__import__ = _fail\n")
+        prefix = self.out("failed-import")
+        result = common.run_engine([common.LIGHTHOUSE, "--out", prefix, "--stage", "preview"],
+                                   env={"PYTHONPATH": hooks})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("deliberate dependency import failure", result.stderr)
+        self.assertIn("Traceback", result.stderr)
+        self.assertEqual(self.usage(prefix)["result"], "failed")
+
     def test_ctrl_c_to_the_launcher_alone_straight_after_start(self):
         scene = self.scene("sleepy3.py", "import time\n" + SCENE_HEAD + "\ndef build():\n    time.sleep(30)\n    return scene(small())\n")
         import signal

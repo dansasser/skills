@@ -218,7 +218,7 @@ Start with [lighthouse.py](assets/scenes/lighthouse.py) for coastal geometry, st
 
 The first runs the default checks; the second enables full-size, performance and process-control checks and can take around 17 minutes on the measured host. They use the selected interpreter and exit nonzero on failures. Select tests with `--test NAME`; use `--help` for syntax.
 
-Full 125-method suites were run on Linux x86-64 with these combinations:
+Before collection packaging, full 125-method suites were run on Linux x86-64 with these combinations. The collection also includes regression checks for interruption during dependency loading and genuine import failures:
 
 | Python | NumPy | SciPy | Pillow | Result |
 | --- | --- | --- | --- | --- |
