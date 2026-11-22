@@ -1,29 +1,46 @@
 # Skills
 
-Reusable agent skills published by **Dan Sasser**.
-
-Each skill belongs in a self-contained folder under [`skills/`](skills/README.md), with its instructions, supporting files, requirements and license. Skills can support Codex, Claude Code and other tools that use the Agent Skills format. Each skill documents its supported agents and runtime requirements.
+Reusable agent skills published by **Dan Sasser**. Each skill is a self-contained folder with standard `SKILL.md` metadata, instructions, supporting resources and its own license.
 
 ## Available skills
 
-No skills have been published in this collection yet.
+| Skill | What it does | Runtime | License |
+| --- | --- | --- | --- |
+| [Mesh Painting](skills/mesh-painting/README.md) | Paint editable landscapes, coasts and buildings with triangle meshes and brushstrokes, without an image-generation model | Linux, Python 3.10+, NumPy, SciPy, Pillow; optional C compiler | [MIT](skills/mesh-painting/LICENSE) |
 
-## Using a skill
+## Install a skill
 
-Choose a skill from this collection and follow the installation and usage instructions in its own README. Install the complete skill folder so its scripts, references and assets remain together. Keep working files and generated output in your own project.
+With Node.js 22.20 or newer, install mesh-painting using the tested Skills CLI:
 
-A skill's compatibility depends on the tools and execution environment it requires, as well as the agent that loads its instructions.
+```sh
+npx skills@1.9.0 add dansasser/skills --skill mesh-painting --copy
+```
 
-## Repository layout
+Choose the agent you use when prompted. This installs the selected skill as independent files. Follow the skill's README to install its runtime dependencies and run an example.
 
-See the [skill directory guide](skills/README.md) for the folder structure and required documentation.
+See the [installation guide](docs/installation.md) for Codex and Claude Code commands, version pinning, manual installation, compatibility and verification. Each skill documents its own requirements; the Agent Skills format alone does not supply a rendering runtime or guarantee every agent can execute it.
 
-## Contributing
+## Verify the collection
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a skill or changing an existing one. Report problems through [GitHub Issues](https://github.com/dansasser/skills/issues), including the skill name, agent, runtime and steps to reproduce.
+Collection validation uses Python 3.11 or newer and the official Agent Skills reference validator, pinned in `tools/requirements.txt`:
 
-## License
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r tools/requirements.txt
+.venv/bin/python tools/validate_collection.py
+.venv/bin/python -m unittest discover -s tests -v
+```
 
-The collection-level documentation and metadata are available under the [MIT License](LICENSE).
+These checks validate skill metadata, the catalog, licenses, relative links and anchors, self-contained resources and common portability/privacy mistakes. They supplement a full source/history review. Each skill also supplies its own runtime checks; see [Mesh Painting verification](skills/mesh-painting/README.md#verification).
 
-Each skill must include its own license. That license governs the skill's code, instructions and bundled assets as described in its documentation. Adding a skill to this collection does not change its existing license. Third-party components retain their own licenses.
+GitHub Actions runs collection validation and mesh-painting's default engine checks on Python 3.10 and 3.14. Full slow checks remain available through the skill's documented command.
+
+## Contributing and security
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [skill directory guide](skills/README.md). Report ordinary problems through [GitHub Issues](https://github.com/dansasser/skills/issues). Follow [SECURITY.md](SECURITY.md) for vulnerabilities.
+
+## Versions and licensing
+
+Skill releases use tags such as `mesh-painting-v0.1.0`; see [CHANGELOG.md](CHANGELOG.md). A tag identifies the collection revision containing that skill version.
+
+Collection documentation and metadata use the [MIT License](LICENSE). Each skill includes its own license covering its code, instructions and bundled assets as stated in its README. Third-party components retain their own licenses.

@@ -20,3 +20,9 @@ Keep the change focused and preserve unrelated behavior. Run the checks appropri
 ## Reporting problems
 
 Include the skill name, agent and version, operating system/runtime, reproduction steps, expected result and actual result. Review logs before sharing them and remove credentials or personal information.
+
+## Validation and versions
+
+Run the collection checks in the [README](README.md#verify-the-collection) and the changed skill's runtime checks. Keep `SKILL.md` license and compatibility metadata accurate. Update the [changelog](CHANGELOG.md) for a release and use a `<skill-name>-v<version>` tag so users can pin that version from the shared repository.
+
+For security issues, follow the [security policy](SECURITY.md).

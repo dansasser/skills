@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mesh Painting"
+  short_description: "Paint realistic scenes from meshes, no image model"
+  default_prompt: "Use $mesh-painting to paint a realistic stone harbour at golden hour with no image model."
