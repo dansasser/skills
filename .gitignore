@@ -1,0 +1,28 @@
+# Local environments and credentials
+.env
+.env.*
+!.env.example
+.venv/
+.venv-*/
+venv/
+
+# Generated Python and native files
+__pycache__/
+*.py[cod]
+*.so
+*.o
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Working output and editor files
+/workspace/
+/out/
+.cache/
+.DS_Store
+*.swp
+
+# Private local development state
+.development-graph/
+development-graph.json
+development-graph.md
