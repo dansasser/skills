@@ -2,7 +2,6 @@
 name: mesh-painting
 description: Paint realistic or painterly landscapes, seascapes and buildings with code alone, using 3D triangle meshes, procedural materials, lighting, shadows and millions of brushstrokes. Use when asked to use mesh painting, render a scene from meshes and brushstrokes, or make a realistic scene without photographs or an image-generation model. Exclude logos, icons, charts, diagrams, text placeholders, photo editing, video and requests for an image-generation service.
 license: MIT
-compatibility: Requires Linux, Python 3.10+, NumPy, SciPy, Pillow, findmnt, procfs, process forking and enforced address-space limits. PNG viewing is required for inspection; a C compiler is optional.
 metadata:
   version: "0.1.0"
 ---
