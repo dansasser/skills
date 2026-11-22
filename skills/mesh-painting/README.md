@@ -2,7 +2,7 @@
 
 Paint landscapes, coasts and buildings from editable Python scenes. Mesh Painting builds triangle meshes, renders procedural materials with sunlight, shadows, water and lens effects, then paints the result in seven brushstroke passes. It uses CPU code, without photographs, downloaded textures or an image-generation model.
 
-If Mesh Painting is useful to you, [star the repo on GitHub](https://github.com/dansasser/skills).
+If Mesh Painting is useful to you, [⭐ star the repo on GitHub](https://github.com/dansasser/skills).
 
 ![A striped lighthouse above a rocky headland in evening light](doc/examples/lighthouse_golden_hour.png)
 
