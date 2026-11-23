@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "context-observability-report.schema.json",
+  "title": "Graph Development context observability report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_type",
+    "status",
+    "subject",
+    "reasons",
+    "items",
+    "budget",
+    "affected_nodes",
+    "unaffected_nodes",
+    "changed_artifacts",
+    "digests"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "report_type": {
+      "enum": [
+        "plan",
+        "envelope",
+        "replay",
+        "cache",
+        "invalidation"
+      ]
+    },
+    "status": {
+      "enum": [
+        "planned",
+        "blocked",
+        "mandatory-overflow",
+        "sealed",
+        "hit",
+        "miss",
+        "corrupt",
+        "affected",
+        "unchanged"
+      ]
+    },
+    "subject": {
+      "type": "object"
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "artifact_id",
+          "token_count"
+        ],
+        "properties": {
+          "code": {
+            "enum": [
+              "mandatory-required",
+              "mandatory-overflow",
+              "mandatory-blocked-unauthorized",
+              "mandatory-blocked-stale",
+              "mandatory-blocked-provenance-incomplete",
+              "mandatory-blocked-conflict",
+              "mandatory-blocked-unavailable",
+              "plan-blocked",
+              "optional-selected",
+              "optional-blocked-unauthorized",
+              "optional-blocked-stale",
+              "optional-blocked-provenance-incomplete",
+              "optional-blocked-conflict",
+              "optional-omitted-no-coverage",
+              "optional-omitted-no-positive-coverage",
+              "optional-omitted-redundant",
+              "optional-omitted-budget",
+              "optional-omitted-not-selected",
+              "optional-omitted-serialization-overflow",
+              "envelope-sealed",
+              "replay-accepted-match",
+              "replay-no-accepted-match",
+              "cache-exact-key-hit",
+              "cache-exact-key-miss",
+              "cache-corrupt-record",
+              "invalidation-artifact-changed",
+              "invalidation-node-affected",
+              "invalidation-node-preserved"
+            ]
+          },
+          "artifact_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifact_id",
+          "classification",
+          "reason_code",
+          "token_count",
+          "digest",
+          "source"
+        ],
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "classification": {
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "mandatory-required",
+              "mandatory-overflow",
+              "mandatory-blocked-unauthorized",
+              "mandatory-blocked-stale",
+              "mandatory-blocked-provenance-incomplete",
+              "mandatory-blocked-conflict",
+              "mandatory-blocked-unavailable",
+              "plan-blocked",
+              "optional-selected",
+              "optional-blocked-unauthorized",
+              "optional-blocked-stale",
+              "optional-blocked-provenance-incomplete",
+              "optional-blocked-conflict",
+              "optional-omitted-no-coverage",
+              "optional-omitted-no-positive-coverage",
+              "optional-omitted-redundant",
+              "optional-omitted-budget",
+              "optional-omitted-not-selected",
+              "optional-omitted-serialization-overflow",
+              "envelope-sealed",
+              "replay-accepted-match",
+              "replay-no-accepted-match",
+              "cache-exact-key-hit",
+              "cache-exact-key-miss",
+              "cache-corrupt-record",
+              "invalidation-artifact-changed",
+              "invalidation-node-affected",
+              "invalidation-node-preserved"
+            ]
+          },
+          "token_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "affected_nodes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "unaffected_nodes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "changed_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    }
+  }
+}

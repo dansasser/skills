@@ -1,0 +1,161 @@
+{
+  "approvals": [
+    {
+      "artifact": "artifact:approve-release",
+      "from": "approve-release",
+      "to": "migrate"
+    }
+  ],
+  "entry_mode": "migration-release",
+  "entry_nodes": [
+    "inventory"
+  ],
+  "feedback": [
+    {
+      "exit_condition": "Verification passes or two repair traversals exhaust and escalate to human review.",
+      "from": "canary",
+      "max_traversals": 2,
+      "to": "migrate"
+    }
+  ],
+  "id": "migration-release",
+  "nodes": [
+    {
+      "destructive": false,
+      "id": "inventory",
+      "output": {
+        "artifact": "artifact:inventory",
+        "format": "evidence-record"
+      },
+      "predecessors": [],
+      "type": "operation",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "compatibility",
+      "output": {
+        "artifact": "artifact:compatibility",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "inventory"
+      ],
+      "type": "verification",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "rollback-proof",
+      "output": {
+        "artifact": "artifact:rollback-proof",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "compatibility"
+      ],
+      "type": "verification",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "migration-dry-run",
+      "output": {
+        "artifact": "artifact:migration-dry-run",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "rollback-proof"
+      ],
+      "type": "operation",
+      "write_scope": [
+        "project"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "approve-release",
+      "output": {
+        "artifact": "artifact:approve-release",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "migration-dry-run"
+      ],
+      "type": "human_gate",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": true,
+      "id": "migrate",
+      "output": {
+        "artifact": "artifact:migrate",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "approve-release"
+      ],
+      "type": "operation",
+      "write_scope": [
+        "project"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "canary",
+      "output": {
+        "artifact": "artifact:canary",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "migrate"
+      ],
+      "type": "verification",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "observe",
+      "output": {
+        "artifact": "artifact:observe",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "canary"
+      ],
+      "type": "observation",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "close",
+      "output": {
+        "artifact": "artifact:close",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "observe"
+      ],
+      "type": "work",
+      "write_scope": [
+        "project"
+      ],
+      "writes": true
+    }
+  ],
+  "project_files": [],
+  "schema_version": 1,
+  "specification": null,
+  "terminal_nodes": [
+    "close"
+  ],
+  "version": 1
+}

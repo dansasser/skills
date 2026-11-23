@@ -7,6 +7,7 @@ Reusable agent skills published by **Dan Sasser**. Each skill is a self-containe
 | Skill | What it does | Runtime | License |
 | --- | --- | --- | --- |
 | [Mesh Painting](skills/mesh-painting/README.md) | Paint editable landscapes, coasts and buildings with triangle meshes and brushstrokes, without an image-generation model | Linux, Python 3.10+, NumPy, SciPy, Pillow; optional C compiler | [MIT](skills/mesh-painting/LICENSE) |
+| [Graph Development](skills/graph-development/README.md) | Build and operate bounded software-development lifecycle graphs with specification, approval, execution and recovery lineage | Linux, Python 3.12+; standard library | [Apache-2.0](skills/graph-development/LICENSE) |
 
 ## Install a skill
 
@@ -16,7 +17,7 @@ With Node.js 22.20 or newer, install mesh-painting using the tested Skills CLI:
 npx skills@1.9.0 add dansasser/skills --skill mesh-painting --copy
 ```
 
-Choose the agent you use when prompted. This installs the selected skill as independent files. Follow the skill's README to install its runtime dependencies and run an example.
+Choose the agent you use when prompted. To select Graph Development from a collection revision containing it, use `--skill graph-development` in the same command. This installs the selected skill as independent files. Follow the skill's README to install its runtime dependencies and run an example.
 
 See the [installation guide](docs/installation.md) for Codex and Claude Code commands, version pinning, manual installation, compatibility and verification. Each skill documents its own requirements; the Agent Skills format alone does not supply a rendering runtime or guarantee every agent can execute it.
 
@@ -31,9 +32,9 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-These checks validate skill metadata, the catalog, licenses, relative links and anchors, self-contained resources and common portability/privacy mistakes. They supplement a full source/history review. Each skill also supplies its own runtime checks; see [Mesh Painting verification](skills/mesh-painting/README.md#verification).
+These checks validate skill metadata, the catalog, licenses, relative links and anchors, self-contained resources and common portability/privacy mistakes. They supplement a full source/history review. Each skill also supplies its own runtime checks; see [Mesh Painting verification](skills/mesh-painting/README.md#verification) and [Graph Development verification](skills/graph-development/README.md#verification).
 
-The GitHub Actions workflow configures collection validation and mesh-painting's default engine checks on Python 3.10 and 3.14. Full slow checks remain available through the skill's documented command.
+The GitHub Actions workflow configures collection validation and mesh-painting's default engine checks on Python 3.10 and 3.14. Full slow checks remain available through the skill's documented command. A separate Graph Development job runs its provider-neutral distribution gate and complete regression suite on Python 3.12.
 
 ## Contributing and security
 

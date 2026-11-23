@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/graph-development/project-lifecycle-receipt.schema.json",
+  "title": "Graph Development project lifecycle receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "transaction_id",
+    "operation",
+    "state",
+    "applied",
+    "base_digest",
+    "plan_digest",
+    "candidate_digest",
+    "changed",
+    "actor",
+    "authority",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "transaction_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/\\\\\u0000]+$"
+    },
+    "operation": {
+      "enum": ["bootstrap", "update", "migration", "graph-mutation", "run-promotion"]
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "committing",
+        "committed",
+        "rolled-back",
+        "recovery-required"
+      ]
+    },
+    "applied": {"type": "boolean"},
+    "base_digest": {"$ref": "#/$defs/digest"},
+    "plan_digest": {"$ref": "#/$defs/digest"},
+    "candidate_digest": {"$ref": "#/$defs/digest"},
+    "changed": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/path"}
+    },
+    "actor": {"type": "string", "minLength": 1},
+    "authority": {"type": "string", "minLength": 1},
+    "error": {"type": ["string", "null"]},
+    "migration": {"type": "object"}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/|~|[A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    }
+  }
+}
