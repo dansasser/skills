@@ -49,9 +49,10 @@ class JobPlan:
             raise ValueError(f'working dimensions must each be at least 16; got {working}')
         area = working[0]*working[1]
         if area > b.level.pixels:
-            raise limits.LimitExceeded('preflight (working canvas)', 'pixels', b.level.pixels,
+            raise limits.LimitExceeded('job check (canvas size)', 'pixels', b.level.pixels,
                                        requested=area, level=b.level.name,
                                        detail=f'{working[0]} x {working[1]}')
+        b.pixels=max(b.pixels,area)
         return cls(delivery, working, working[0]/1600.0, area, scale, stage)
 
     def as_dict(self):
