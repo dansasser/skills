@@ -15,7 +15,9 @@ scene by itself.
 import argparse
 import fcntl
 import glob
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import select
@@ -24,9 +26,12 @@ import stat
 import sys
 import time
 import traceback
+import tempfile
+import uuid
 
 from . import limits, procfs
 from .looks import LOOKS
+from .output import MAX_TILE_COUNT, Outputs, atomic_json, digest, read_manifest, verify_receipt
 
 KEPT_SUFFIXES = (".png", "_full.png", "_partial.png", "_render.png", "_preview.png")
 _STOP_SIGNALS = {signal.SIGTERM, signal.SIGINT}      # held across each fork so none is lost or mishandled in between
@@ -42,42 +47,6 @@ def _display_path(path):
     return str(Path(os.path.relpath(common, cwd)) / Path(path).relative_to(common))
 
 
-class Outputs:
-    """Images are written under temporary names and take their real names only when the stage that
-    made them has finished, so a stopped run never damages an image from an earlier one."""
-
-    def __init__(self, tell=None):
-        self.tag = f".part-{os.getpid()}"
-        self.pending, self.done = [], []
-        self.tell = tell or (lambda **msg: None)     # each rename is reported as it happens
-
-    def save(self, image, path):
-        image.save(path + self.tag, format="PNG")
-        self.pending.append(path)
-        return path
-
-    def commit(self):
-        """Give the pending images their real names. A stop or time limit that arrives during the
-        renames is held until they are all done, so a stage's images change together."""
-        limits.hold()
-        try:
-            while self.pending:
-                path = self.pending[0]
-                os.replace(path + self.tag, path)
-                self.done.append(self.pending.pop(0))
-                self.tell(image=path)
-        finally:
-            limits.release()
-
-    def discard(self):
-        for path in self.pending:
-            try:
-                os.remove(path + self.tag)
-            except OSError:
-                pass
-        self.pending = []
-
-
 def _to_image(arr):
     import numpy as np
     from PIL import Image
@@ -90,6 +59,8 @@ def _to_image(arr):
 def tiles(arr, prefix, grid, outs):
     cols, rows = (int(v) for v in grid.lower().split("x"))
     H, W = arr.shape[:2]
+    if cols <= 0 or rows <= 0 or cols > W or rows > H or cols*rows > MAX_TILE_COUNT:
+        raise ValueError(f"meshpaint: tile grid {grid!r} must fit canvas {W}x{H} and the {MAX_TILE_COUNT}-tile output guard")
     out = []
     for r in range(rows):
         for c in range(cols):
@@ -122,11 +93,61 @@ def _is_meshpaint(pid, started=None):
 
 def _read_pidfile(pidfile):
     """(pid, start time or None) from a pid file; raises OSError or ValueError if it cannot be read."""
-    with open(pidfile) as fh:
-        parts = fh.read().split()
+    parent, name = os.path.split(os.path.abspath(pidfile))
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+        try:
+            entry = os.fstat(fd)
+            if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1 or entry.st_uid != os.getuid():
+                raise OSError("the PID entry must be an owned regular file with one link")
+            parts = os.read(fd, 257).decode().split()
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory)
     if not parts:
         raise ValueError("the pid file is empty")
     return int(parts[0]), (parts[1] if len(parts) > 1 else None)
+
+
+def _publish_pidfile(pidfile, run_id):
+    """Publish a new owned record while the persistent output lock is held."""
+    try:
+        _read_pidfile(pidfile)
+    except FileNotFoundError:
+        pass
+    except ValueError:
+        pass                                         # stale malformed regular entry can be replaced
+    parent, name = os.path.split(os.path.abspath(pidfile))
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    identity = (os.getpid(), _start_time(os.getpid()))
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=name+'.part-', dir=parent)
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(f'{identity[0]} {identity[1] or ""} {run_id}'.strip())
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(os.path.basename(temporary), name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+        entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        return identity, (entry.st_dev, entry.st_ino)
+    finally:
+        try:
+            if temporary is not None:
+                os.unlink(os.path.basename(temporary), dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        os.close(directory)
+
+
+def _remove_owned_pidfile(pidfile, identity, inode):
+    try:
+        entry = os.stat(pidfile, follow_symlinks=False)
+        if (entry.st_dev, entry.st_ino) == inode and _read_pidfile(pidfile) == identity:
+            os.remove(pidfile)
+    except (OSError, ValueError):
+        pass
 
 
 def _lock_output(prefix):
@@ -140,8 +161,8 @@ def _lock_output(prefix):
     fd = os.open(prefix + ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         entry = os.fstat(fd)
-        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
-            raise OSError("the output coordination file must be a regular file with one link")
+        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1 or entry.st_uid != os.getuid():
+            raise OSError("the output coordination file must be an owned regular file with one link")
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BaseException:
         os.close(fd)
@@ -197,6 +218,31 @@ def stop(pidfile):
     _remove_stopped_pidfile(pidfile, (pid, started))
 
 
+def _provenance(a, plan, sc):
+    import numpy
+    import scipy
+    import PIL
+    from . import native
+    source = hashlib.sha256()
+    for path in sorted(p for p in Path(__file__).parent.iterdir() if p.suffix in ('.py', '.c', '.h')):
+        source.update(path.name.encode()); source.update(b'\0'); source.update(path.read_bytes())
+    return dict(schema_version=1, run_id=a.run_id, scene_sha256=a.scene_sha256,
+                source_sha256=source.hexdigest(), runtime=dict(python=sys.version.split()[0],
+                    numpy=numpy.__version__, scipy=scipy.__version__, pillow=PIL.__version__),
+                requested_profile=a.level, effective_limits=limits.active().allowed(),
+                settings=dict(stage=a.stage, seed=a.seed, scale=a.scale, tiles=a.tiles,
+                    look=a.look, sun=a.sun, paint_policy=a.paint_policy, finish=a.finish,
+                    paint_config=a.paint_config_data, max_strokes=a.max_strokes, max_passes=a.max_passes),
+                resolved_scene=dict(look=dict(sun_offset=a.sun[0], sun_elev=a.sun[1]) if a.sun else a.look or sc.look,
+                    camera=dict(eye=sc.camera.eye.tolist(), **{name:float(getattr(sc.camera, name)) for name in
+                        ('bearing', 'pitch', 'focal', 'focus', 'aperture')}),
+                    sea=bool(sc.sea), sea_state=float(sc.sea_state), foam=float(sc.foam),
+                    reflections=bool(sc.reflections), clouds=float(sc.clouds), lens_ghosts=bool(sc.lens_ghosts)),
+                dimensions=plan.as_dict(), numerical_thread_environment={name:os.environ.get(name) for name in
+                    ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS')},
+                core=dict(kind='not yet selected', fallback_reason=None))
+
+
 def _job(a, outs):
     """The render itself. Runs in the renderer process, after the ceilings are in place."""
     limits.stage("loading the engine")
@@ -205,70 +251,99 @@ def _job(a, outs):
     from PIL import Image
     from . import pipeline, util
     from .paint import paint, planned_strokes
-    from .scene import validate_regions
+    from .scene import validate_scene
+    from .resources import JobPlan
 
     util.seed(a.seed)
     limits.stage("scene build")
     spec = importlib.util.spec_from_file_location("scene_module", a.scene)
-    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    if spec is None or spec.loader is None:
+        raise ValueError('meshpaint: scene must be a loadable Python source file')
+    scene_bytes = Path(a.scene).read_bytes()
+    if hashlib.sha256(scene_bytes).hexdigest() != a.scene_sha256:
+        raise ValueError('meshpaint: scene source changed during startup; no scene code was executed')
+    mod = importlib.util.module_from_spec(spec)
+    exec(compile(scene_bytes, spec.origin, 'exec'), mod.__dict__)
     sc = mod.build()
     limits.reraise_latched()                         # a limit hit in a scene thread, or caught by the scene
-    validate_regions(sc)                            # reject unsupported IDs before allocating any rendering buffers
+    validate_scene(sc)                              # reject unsupported inputs before rendering buffers
     S = 1.0 if a.stage == "preview" else a.scale
     limits.stage("job check")
-    if int(sc.size[0] * S) < 16 or int(sc.size[1] * S) < 16:
-        raise SystemExit(f"meshpaint: the canvas would be {int(sc.size[0] * S)} x {int(sc.size[1] * S)} pixels; "
-                         "check --scale and Scene.size")
-    limits.check_pixels("job check (canvas size)", int(sc.size[0] * S), int(sc.size[1] * S))
+    plan = JobPlan.resolve(sc.size, S, stage=a.stage)
+    if a.tiles != '0':
+        cols, rows = map(int, a.tiles.split('x'))
+        if cols > plan.working_size[0] or rows > plan.working_size[1]:
+            raise ValueError(f'meshpaint: tile grid {a.tiles} exceeds working canvas {plan.working_size}')
+    outs.provenance = _provenance(a, plan, sc)
+    outs.tell(provenance=outs.provenance)
     if a.stage == "paint":                           # refuse the painting before the render is paid for
-        limits.check_strokes("job check (planning the passes)", planned_strokes(S * sc.size[0] / 1600.0))
+        if a.paint_policy == 'legacy-seven':
+            limits.check_strokes("job check (planning the passes)", planned_strokes(S * sc.size[0] / 1600.0))
+        else:
+            from .painting_policy import stroke_ceiling
+            upper = stroke_ceiling(*plan.working_size, a.max_strokes)
+            limits.check_strokes('job check (adaptive allocation)', upper)
     log = pipeline.make_log()
     look = dict(sun_offset=a.sun[0], sun_elev=a.sun[1]) if a.sun else a.look
     r = pipeline.render(sc, S, log, look)
+    from . import native
+    outs.provenance['core'] = dict(kind='native' if native.NATIVE else 'python',
+                                  fallback_reason=None if native.NATIVE else native.REASON)
+    outs.provenance['resource_plan'] = getattr(limits.active(), 'resource_plan', None)
+    outs.tell(provenance=outs.provenance)
     if a.stage == "preview":
         limits.stage("writing images")
         outs.save(_to_image(r["target"]), a.out + "_preview.png")
-        limits.stop_timer(); outs.commit()
+        receipt = outs.commit(terminal_reason='preset_complete')
         print("wrote", _display_path(a.out) + "_preview.png")
-        return
+        return dict(receipt, dimensions=plan.as_dict())
     small = lambda arr: _to_image(arr).resize(sc.size, Image.LANCZOS)
     if a.stage == "render":
         limits.stage("writing images")
         written = [outs.save(small(r["target"]), a.out + "_render.png")]
         written += tiles(r["target"], a.out + "_render", a.tiles, outs) if a.tiles != "0" else []
     else:
-        outs.save(small(r["target"]), a.out + "_render.png"); outs.commit()     # survives if the painting is stopped
+        outs.save(small(r["target"]), a.out + "_render.png"); outs.commit(terminal_reason='render_ready')
         log("render kept as " + _display_path(a.out) + "_render.png")
         last = {}
 
         def checkpoint(canvas, passes, strokes):     # the canvas as it stood after the last whole pass
             if "canvas" not in last:
                 last["canvas"] = np.empty_like(canvas)
-            np.copyto(last["canvas"], canvas); last["passes"] = passes
+            np.copyto(last["canvas"], canvas); last["passes"] = passes; last['strokes'] = strokes
         try:
             canvas, n = paint(r["target"], r["regions"], sc.stroke_angle, r["S"], r["horizon_y"], util.rng(), log,
-                              checkpoint=checkpoint)
+                              checkpoint=checkpoint, policy=a.paint_policy, finish=a.finish,
+                              config=a.paint_config_data, max_strokes=a.max_strokes,
+                              max_passes=a.max_passes, seed=a.seed)
+            outs.provenance['painting'] = getattr(limits.active(), 'painting', {})
             log(f"painted with {n} strokes")
             limits.stage("writing images")
             outs.save(_to_image(canvas), a.out + "_full.png")
             written = [outs.save(small(canvas), a.out + ".png"), a.out + "_full.png"]
             written += tiles(canvas, a.out, a.tiles, outs) if a.tiles != "0" else []
-        except (limits.LimitExceeded, MemoryError):
+        except (limits.LimitExceeded, MemoryError, SystemExit):
             limits.stop_timer()
             try:                                     # keep the painting as it stood after the last whole pass
                 outs.discard()
                 if "canvas" in last:
-                    outs.save(small(last["canvas"]), a.out + "_partial.png"); outs.commit()
+                    outs.provenance['painting'] = getattr(limits.active(), 'painting', {})
+                    outs.save(small(last["canvas"]), a.out + "_partial.png")
+                    outs.provenance['checkpoint'] = dict(work_units=last['passes'], strokes=last['strokes'])
+                    outs.commit(partial=True, terminal_reason=getattr(limits.active(), 'painting', {}).get('terminal_reason', 'cancelled'))
                     log(f"painting as it stood after pass {last['passes']} kept as {_display_path(a.out)}_partial.png")
             except BaseException:                    # best effort (memory may not allow it); the limit stop stands
                 outs.discard()
             raise
+    reason = getattr(limits.active(), 'painting', {}).get('terminal_reason', 'preset_complete')
+    receipt = outs.commit(terminal_reason=reason)
+    if a.stage == 'paint':
         try:
-            os.remove(a.out + "_partial.png")        # left by an earlier stopped run; now out of date
+            os.remove(a.out + '_partial.png')         # clear only after the complete generation is selected
         except OSError:
             pass
-    limits.stop_timer(); outs.commit()
     print("wrote", *(_display_path(p) for p in written), sep="\n  ")
+    return dict(receipt, dimensions=plan.as_dict())
 
 
 def _renderer(a, budget, wfd, parent):
@@ -294,19 +369,29 @@ def _renderer(a, budget, wfd, parent):
         ctypes.CDLL(None).prctl(1, int(signal.SIGTERM), 0, 0, 0)
     except Exception:
         pass
-    outs = Outputs(tell)
+    outs = Outputs(tell, prefix=a.out, run_id=a.run_id, stage=a.stage)
     code, stop = 0, None
+    stage_complete, failure_detail = None, None
+    timings = []
+    def stage_started(name):
+        timings.append(dict(stage=name, at_seconds=round(budget.elapsed(), 6)))
+        tell(stage=name)
     try:
         try:
             if os.getppid() != parent:
+                budget.interrupted = True
                 raise SystemExit(143)
-            budget.on_stage = lambda name: tell(stage=name)
+            budget.on_stage = stage_started
             limits.apply_memory_ceiling()            # both ceilings are in place before the scene file loads
             limits.start_timer()
             limits.lock()                            # the level cannot be changed from here on
             tell(memory_enforced=True, memory_mb=budget.level.memory_mb)
-            _job(a, outs)
+            receipt = _job(a, outs)
             limits.reraise_latched()
+            if not receipt:
+                raise ValueError('renderer returned without a completed output receipt')
+            stage_complete = receipt
+            tell(stage_complete=stage_complete)
         except limits.LimitExceeded as e:
             stop = e.as_dict()
         except MemoryError as e:
@@ -315,10 +400,13 @@ def _renderer(a, budget, wfd, parent):
             if isinstance(e.code, str):
                 print(e.code, file=sys.stderr)
             code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
-            if code == limits.EXIT_LIMIT:            # that code is reserved for a limit stop
+            if code == 0 or code == limits.EXIT_LIMIT or (code in (130, 143) and not budget.interrupted):
+                failure_detail = f'scene exited with code {code} before a complete stage receipt'
                 code = 1
         except KeyboardInterrupt:
-            code = 130
+            code = 143 if budget.interrupted else 1
+            if not budget.interrupted:
+                failure_detail = 'scene raised KeyboardInterrupt without a recorded stop request'
         except BaseException:
             # C-extension imports can wrap a stop exception in ImportError.
             # The recorded stop remains authoritative; genuine errors stay visible.
@@ -336,7 +424,12 @@ def _renderer(a, budget, wfd, parent):
         stop = stop or e.as_dict()
     if stop:
         code = limits.EXIT_LIMIT
-    tell(stop=stop, usage=budget.usage(), memory_mb=budget.level.memory_mb)
+    usage = budget.usage()
+    usage['stage_timings'] = timings
+    usage['painting'] = getattr(budget, 'painting', {})
+    usage['resource_plan'] = getattr(budget, 'resource_plan', None)
+    tell(stop=stop, usage=usage, memory_mb=budget.level.memory_mb, failure_detail=failure_detail,
+         renderer_interrupted=budget.interrupted, export_errors=outs.export_errors)
     if os.getppid() != parent:                       # the supervisor is gone: nobody else will stop what the scene started
         try:
             sys.stdout.flush(); sys.stderr.flush()
@@ -606,25 +699,59 @@ def _supervisor(a, budget):
                         allowed=budget.level.seconds, level=budget.level.name,
                         detail="the run ignored its time limit and finished late; its images were written")
             code = limits.EXIT_LIMIT
+        elif code == 0:
+            try:
+                verify_receipt(seen.get('stage_complete'), run_id=a.run_id, stage=a.stage, prefix=a.out)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                failure = f'output completion verification failed: {error}'
+                code = 1
+        elif code in (130, 143) and not (child['asked'] or seen.get('renderer_interrupted')):
+            failure = 'the scene used an interruption exit code without a recorded stop request'
+            code = 1
         elif code not in (0, 143, 130):
-            failure = f"the renderer exited with code {code} during stage '{seen.get('stage')}'"
+            failure = seen.get('failure_detail') or f"the renderer exited with code {code} during stage '{seen.get('stage')}'"
     if child["asked"] and not stop and code != 0:    # a request to stop, however the renderer went down
         code, failure = (130 if interrupted else 143), None
     kept = [(a.out + sfx) for sfx in KEPT_SUFFIXES if os.path.exists(a.out + sfx)]
     made = set(seen["images"])
     result = "stopped" if stop else "completed" if code == 0 else "interrupted" if code in (143, 130) else "failed"
-    report = dict(level=budget.level.name, stage=a.stage, scale=(1.0 if a.stage == "preview" else a.scale),
+    authoritative, manifest_error = None, None
+    try:
+        authoritative = read_manifest(a.out+'_manifest.json')
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as error:
+        manifest_error = str(error)
+    terminal_reason = usage.get('painting', {}).get('terminal_reason')
+    if not terminal_reason or result != 'completed' and terminal_reason in ('preset_complete', 'quality_target', 'diminishing_returns'):
+        terminal_reason = ('cancelled' if result == 'interrupted' else stop.get('limit') if stop else
+                           'preset_complete' if result == 'completed' else
+                           'output_error' if seen.get('stage') == 'writing images' else 'input_error')
+    exports = []
+    selected = {str(Path(a.out).parent/e['export']):e for e in (authoritative or {}).get('images', [])}
+    for path in kept:
+        entry = selected.get(path)
+        try:
+            matches = bool(entry and digest(path) == entry['sha256'])
+        except OSError:
+            matches = False
+        exports.append(dict(path=_display_path(path), selected_generation_matches=matches,
+                            written_by_this_run=path in made))
+    report = dict(schema_version=1, run_id=a.run_id, level=budget.level.name, stage=a.stage,
+                  scale=(1.0 if a.stage == "preview" else a.scale), terminal_reason=terminal_reason,
                   scene=_display_path(a.scene), result=result, stop=stop, failure=failure, allowed=allowed, usage=usage,
+                  provenance=seen.get('provenance'), stage_complete=seen.get('stage_complete'),
+                  authoritative_generation=authoritative, manifest_error=manifest_error,
+                  compatibility_exports=exports, export_errors=seen.get('export_errors', []),
                   memory_ceiling_enforced=bool(seen.get("memory_enforced")),
                   images_kept=[dict(path=_display_path(p), written_by_this_run=p in made) for p in kept],
                   images_written_by_this_run=sorted(_display_path(p) for p in made), processes_left_running=watch.left_running)
     try:
-        part = f"{a.out}_usage.json.part-{os.getpid()}"
-        with open(part, "w") as fh:
-            json.dump(report, fh, indent=1)
-        os.replace(part, a.out + "_usage.json")
+        atomic_json(a.out+'_usage.json', report)
     except OSError as e:
         print(f"meshpaint: could not write the usage report: {e}", file=sys.stderr)
+        if code == 0:
+            code = 1                               # a completed report is part of a completed CLI stage
     kept_line = ("meshpaint: images kept: " + ", ".join(_display_path(p) + (" (from this run)" if p in made else " (from an earlier run)") for p in kept)
                  if kept else "meshpaint: no image exists yet for this output name")
     if stop:
@@ -665,6 +792,11 @@ def main(own_process=False):
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--time-limit", type=float, metavar="SECONDS", help="a shorter time limit than the level's (can only lower it)")
     ap.add_argument("--memory-limit", type=int, metavar="MIB", help="a lower memory ceiling than the level's (can only lower it)")
+    ap.add_argument('--paint-policy', choices=('legacy-seven', 'adaptive-v1'), default='legacy-seven')
+    ap.add_argument('--finish', choices=('photographic', 'painterly'), default=None)
+    ap.add_argument('--paint-config', metavar='FILE', help='versioned adaptive policy JSON')
+    ap.add_argument('--max-strokes', type=int, metavar='N', help='lower the per-job stroke allocation')
+    ap.add_argument('--max-passes', type=int, metavar='N', help='finite adaptive work-unit guard')
     ap.add_argument("--stop", action="store_true", help="stop the run that owns --out (uses its pid file)")
     a = ap.parse_args()
     pidfile = a.out + ".pid"
@@ -684,6 +816,56 @@ def main(own_process=False):
         a.scale = limits.LEVELS[a.level].scale
     if not 0 < a.scale < float("inf"):
         ap.error("--scale must be a positive number")
+    if a.seed < 0:
+        ap.error('--seed must be a nonnegative integer')
+    if a.sun and not all(math.isfinite(value) for value in a.sun):
+        ap.error('--sun values must be finite numbers')
+    if a.tiles != '0':
+        try:
+            components = a.tiles.lower().split('x')
+            if len(components) != 2:
+                raise ValueError()
+            cols, rows = map(int, components)
+            if cols <= 0 or rows <= 0 or cols*rows > min(MAX_TILE_COUNT, limits.LEVELS[a.level].pixels):
+                raise ValueError()
+            a.tiles = f'{cols}x{rows}'
+        except ValueError:
+            ap.error(f'--tiles must be 0 or positive COLSxROWS, at most {MAX_TILE_COUNT} tile images within the profile pixel ceiling')
+    for name in ('max_strokes', 'max_passes'):
+        value = getattr(a, name)
+        if value is not None and value < 1:
+            ap.error('--'+name.replace('_', '-')+' must be a positive integer')
+    if a.max_strokes is not None and a.max_strokes > limits.LEVELS[a.level].strokes:
+        ap.error('--max-strokes can only lower the profile stroke ceiling')
+    if a.paint_policy == 'legacy-seven' and any(value is not None for value in (a.finish, a.paint_config, a.max_strokes, a.max_passes)):
+        ap.error('legacy-seven is an exact compatibility preset; select adaptive-v1 to customize painting')
+    a.paint_config_data = None
+    if a.paint_policy == 'adaptive-v1':
+        try:
+            if a.paint_config:
+                fd = os.open(a.paint_config, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                try:
+                    entry = os.fstat(fd)
+                    if not stat.S_ISREG(entry.st_mode) or entry.st_size > 65536:
+                        raise ValueError('painting configuration must be a regular JSON file of at most 64 KiB')
+                    raw = os.read(fd, 65537)
+                    if len(raw) > 65536:
+                        raise ValueError('painting configuration exceeds 64 KiB')
+                    a.paint_config_data = json.loads(raw)
+                finally:
+                    os.close(fd)
+            from .painting_policy import resolve_config
+            config = resolve_config(a.paint_config_data, finish=a.finish or 'photographic')
+            if a.max_passes is not None and a.max_passes > config.max_batches:
+                raise ValueError('--max-passes can only lower the configured maximum work units')
+            a.paint_config_data = config.as_dict()
+        except (OSError, ValueError, TypeError) as error:
+            ap.error(f'invalid painting configuration: {error}')
+    a.run_id = uuid.uuid4().hex
+    try:
+        a.scene_sha256 = digest(a.scene)
+    except OSError as error:
+        ap.error(f'cannot read scene file: {error}')
     try:
         budget = limits.use(a.level, memory_mb=a.memory_limit, seconds=a.time_limit)
     except ValueError as e:
@@ -720,18 +902,14 @@ def main(own_process=False):
                 other = other_started = None
             if other and other != os.getpid() and _is_meshpaint(other, other_started):
                 _refuse_output(a.out, pidfile)
-            with open(pidfile, "w") as fh:
-                fh.write(f"{os.getpid()} {_start_time(os.getpid()) or ''}".strip())
+            owned_identity, owned_inode = _publish_pidfile(pidfile, a.run_id)
         except OSError as e:
             print(f"meshpaint: cannot write to the output location: {e}", file=sys.stderr)
             sys.exit(2)
         try:
             code = _run(a, budget, state, orig_mask)
         finally:
-            try:
-                os.remove(pidfile)
-            except OSError:
-                pass
+            _remove_owned_pidfile(pidfile, owned_identity, owned_inode)
     finally:
         if ownership_fd is not None:
             os.close(ownership_fd)

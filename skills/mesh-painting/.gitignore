@@ -14,6 +14,8 @@ __pycache__/
 *_partial.png
 *_tile_r*c*.png
 *_usage.json
+*_manifest.json
+*_generations/
 *.pid
 *.lock
 *.part-*

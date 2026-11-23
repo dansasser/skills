@@ -413,7 +413,7 @@ def save(self, fp, *a, **kw):
     real_save(self, fp, *a, **kw)
     count[0] += 1
     if count[0] == 3:
-        waiting = [n for n in os.listdir(os.path.dirname(fp)) if '.part-' in n]
+        waiting = [n for n in os.listdir(os.path.dirname(getattr(fp, 'name', fp))) if '.part-' in n]
         open(__file__ + '.waiting', 'w').write(str(len(waiting)))
         if os.environ['FAULT'] == 'kill':
             os.kill(os.getpid(), signal.SIGKILL)
