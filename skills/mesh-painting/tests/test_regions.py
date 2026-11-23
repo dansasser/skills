@@ -77,7 +77,8 @@ class RegionValues(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='region validation ') as work:
             path = Path(work, 'scene.py')
             path.write_text(SCENE.format(regions='default_region=128'))
-            args = SimpleNamespace(scene=str(path), seed=11, stage='preview', scale=1)
+            args = SimpleNamespace(scene=str(path), seed=11, stage='preview', scale=1,
+                                   scene_snapshot=__main__._scene_snapshot(path))
             with patch.object(limits, '_active', limits.Budget()), \
                     patch.object(limits, 'check_pixels') as pixels, \
                     patch.object(pipeline, 'render') as render:
