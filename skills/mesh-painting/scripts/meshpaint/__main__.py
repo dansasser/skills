@@ -32,6 +32,7 @@ import uuid
 from . import limits, procfs
 from .looks import LOOKS
 from .output import MAX_TILE_COUNT, Outputs, atomic_json, digest, read_manifest, verify_receipt
+from .output_control import ExportLease, refuse_source_collisions
 
 KEPT_SUFFIXES = (".png", "_full.png", "_partial.png", "_render.png", "_preview.png")
 _STOP_SIGNALS = {signal.SIGTERM, signal.SIGINT}      # held across each fork so none is lost or mishandled in between
@@ -327,6 +328,8 @@ def _job(a, outs):
             except ValueError as error:
                 raise JobInputError(f'meshpaint: {error}') from None
             limits.check_strokes('job check (adaptive allocation)', upper)
+    limits.stage('output preflight')
+    outs.prepare()
     log = pipeline.make_log()
     look = dict(sun_offset=a.sun[0], sun_elev=a.sun[1]) if a.sun else a.look
     r = pipeline.render(sc, S, log, look)
@@ -476,6 +479,7 @@ def _renderer(a, budget, wfd, parent):
     usage['stage_timings'] = timings
     usage['painting'] = getattr(budget, 'painting', {})
     usage['resource_plan'] = getattr(budget, 'resource_plan', None)
+    usage['disk'] = outs.disk_report
     tell(stop=stop, usage=usage, memory_mb=budget.level.memory_mb, failure_detail=failure_detail,
          renderer_interrupted=budget.interrupted, export_errors=outs.export_errors)
     if os.getppid() != parent:                       # the supervisor is gone: nobody else will stop what the scene started
@@ -774,7 +778,7 @@ def _supervisor(a, budget):
     if not terminal_reason or result != 'completed' and terminal_reason in ('preset_complete', 'quality_target', 'diminishing_returns'):
         terminal_reason = ('cancelled' if result == 'interrupted' else stop.get('limit') if stop else
                            'preset_complete' if result == 'completed' else
-                           'output_error' if seen.get('stage') == 'writing images' else 'input_error')
+                           'output_error' if seen.get('stage') in ('writing images', 'output preflight') else 'input_error')
     exports = []
     selected = {str(Path(a.out).parent/e['export']):e for e in (authoritative or {}).get('images', [])}
     for path in kept:
@@ -790,6 +794,7 @@ def _supervisor(a, budget):
                   scene=_display_path(a.scene), result=result, stop=stop, failure=failure, allowed=allowed, usage=usage,
                   provenance=seen.get('provenance'), stage_complete=seen.get('stage_complete'),
                   authoritative_generation=authoritative, manifest_error=manifest_error,
+                  disk=usage.get('disk'),
                   compatibility_exports=exports, export_errors=seen.get('export_errors', []),
                   memory_ceiling_enforced=bool(seen.get("memory_enforced")),
                   images_kept=[dict(path=_display_path(p), written_by_this_run=p in made) for p in kept],
@@ -888,6 +893,7 @@ def main(own_process=False):
     if a.paint_policy == 'legacy-seven' and any(value is not None for value in (a.finish, a.paint_config, a.max_strokes, a.max_passes)):
         ap.error('legacy-seven is an exact compatibility preset; select adaptive-v1 to customize painting')
     a.paint_config_data = None
+    a.paint_config_snapshot = None
     if a.paint_policy == 'adaptive-v1':
         try:
             if a.paint_config:
@@ -897,6 +903,9 @@ def main(own_process=False):
                     if not stat.S_ISREG(entry.st_mode) or entry.st_size > 65536:
                         raise ValueError('painting configuration must be a regular JSON file of at most 64 KiB')
                     raw = os.read(fd, 65537)
+                    a.paint_config_snapshot = _source_fingerprint(entry)
+                    if _source_fingerprint(os.fstat(fd)) != a.paint_config_snapshot:
+                        raise ValueError('painting configuration changed while it was read')
                     if len(raw) > 65536:
                         raise ValueError('painting configuration exceeds 64 KiB')
                     a.paint_config_data = json.loads(raw)
@@ -916,6 +925,13 @@ def main(own_process=False):
     except (OSError, ValueError) as error:
         ap.error(f'cannot admit scene source: {error}')
     try:
+        refuse_source_collisions(a.scene, a.scene_snapshot, a.out, a.tiles, stage=a.stage)
+        if a.paint_config:
+            refuse_source_collisions(a.paint_config, a.paint_config_snapshot, a.out, a.tiles,
+                                     label='painting configuration', stage=a.stage)
+    except (OSError, ValueError) as error:
+        ap.error(str(error))
+    try:
         budget = limits.use(a.level, memory_mb=a.memory_limit, seconds=a.time_limit)
     except ValueError as e:
         ap.error(str(e))
@@ -924,6 +940,7 @@ def main(own_process=False):
     # pass the request on to the supervisor. Everything is put back before main() returns.
     state = {"pid": None, "handlers": None}
     ownership_fd = None
+    export_lease = None
 
     def _pass_on(signum, frame):
         if state["pid"]:
@@ -945,6 +962,8 @@ def main(own_process=False):
                 ownership_fd = _lock_output(a.out)
             except BlockingIOError:
                 _refuse_output(a.out, pidfile)
+            export_lease = ExportLease(a.out, a.tiles, a.run_id, ownership_fd,
+                                       os.getpid(), _start_time(os.getpid()), stage=a.stage)
             try:
                 other, other_started = _read_pidfile(pidfile)
             except (OSError, ValueError):
@@ -960,6 +979,12 @@ def main(own_process=False):
         finally:
             _remove_owned_pidfile(pidfile, owned_identity, owned_inode)
     finally:
+        if export_lease is not None:
+            try:
+                export_lease.release()
+            except OSError as error:
+                print(f'meshpaint: could not update the export lease ledger: {error}; '
+                      'the unlocked prefix lease can be recovered by the next run', file=sys.stderr)
         if ownership_fd is not None:
             os.close(ownership_fd)
         if not own_process:                          # a calling program gets its own handling back, exactly

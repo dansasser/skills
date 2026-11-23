@@ -462,7 +462,7 @@ for sfx in ("_a.png", "_b.png", "_c.png"):
 real, sent = os.replace, []
 def replace(src, dst):
     real(src, dst)
-    if not sent:
+    if not sent and str(dst).endswith('.png'):
         sent.append(1); os.kill(os.getpid(), signal.SIGTERM)
         for _ in range(200000): pass                          # give the handler every chance to run now
 os.replace = replace

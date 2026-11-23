@@ -11,6 +11,7 @@ import tempfile
 import uuid
 
 from . import limits
+from .generation_store import GenerationStore, MAX_METADATA_BYTES
 
 MAX_TILE_COUNT = 1024                   # bounded file count, qualified independently of pixel allocation
 
@@ -64,6 +65,8 @@ def read_manifest(path):
         entry = os.fstat(stream.fileno())
         if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1 or entry.st_uid != os.getuid():
             raise OSError('the output manifest must be an owned regular file with one link')
+        if entry.st_size > MAX_METADATA_BYTES:
+            raise ValueError('output manifest exceeds16MiB metadata bound')
         data = json.load(stream)
     if (not isinstance(data, dict) or data.get('schema_version') != 1 or
             not isinstance(data.get('run_id'), str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', data['run_id']) or
@@ -109,6 +112,24 @@ class Outputs:
         self.receipt = None
         self.export_errors = []
         self._saved_sizes = {}
+        self.store = None
+        self.disk_report = {}
+        self.observed_peak_staging_bytes = 0
+        self.staging_bytes = 0
+
+    def prepare(self):
+        if self.store is None:
+            self.store = GenerationStore(self.prefix, self.run_id, limits.active().level,
+                                          read_manifest, atomic_json, digest, self.provenance)
+        try:
+            self.disk_report = self.store.prepare()
+        except (OSError, ValueError, KeyError) as error:
+            self.disk_report = dict(self.store.report, failure=str(error),
+                                    blocked_entries=list(self.store.blocked), unknown_entries=list(self.store.unknown))
+            self.tell(disk_storage=self.disk_report)
+            raise
+        self.tell(disk_storage=self.disk_report)
+        return self.disk_report
 
     def save(self, image, path):
         path = os.fspath(path)
@@ -116,6 +137,9 @@ class Outputs:
             self.prefix = os.path.splitext(path)[0]
         if Path(path).parent.resolve() != Path(self.prefix).parent.resolve():
             raise ValueError('all output images must share the output-prefix directory')
+        self.prepare()
+        if len(set(self.current)|set(self.pending)|{path}) > MAX_TILE_COUNT+3:
+            raise OSError('generation image count exceeds its finite output bound')
         temporary = path+self.tag
         try:
             with open(temporary, 'xb') as stream:     # O_EXCL refuses links and preserves descriptor identity
@@ -135,22 +159,21 @@ class Outputs:
             raise
         self._saved_sizes[path] = list(image.size)
         self.pending.append(path)
+        self.staging_bytes += os.stat(temporary, follow_symlinks=False).st_size
+        self.observed_peak_staging_bytes = max(self.observed_peak_staging_bytes, self.staging_bytes)
         return path
 
     def commit(self, *, terminal_reason=None, partial=False):
         if not self.pending:
             return self.receipt
+        self.prepare()
         root = Path(self.prefix).parent
-        generations = Path(self.prefix+'_generations')
-        _directory(generations)
-        run = generations/self.run_id
-        _directory(run)
         generation_id = uuid.uuid4().hex
-        generation = run/generation_id
-        os.mkdir(generation, 0o700)
         staged = dict(self.current)
         for path in self.pending:
             staged[path] = dict(source=path+self.tag, size=self._saved_sizes[path])
+        previous_good = self.store.previous_good(self.store.selected())
+        generation = self.store.begin(generation_id, [Path(p).name for p in staged], previous_good)
         entries = []
         for export, data in staged.items():
             destination = generation/Path(export).name
@@ -171,22 +194,17 @@ class Outputs:
             entries.append(dict(export=os.path.relpath(export, root), path=os.path.relpath(destination, root),
                                 sha256=digest(destination), bytes=destination.stat().st_size, size=data['size']))
         _sync_dir(generation)
-        _sync_dir(run)
-        _sync_dir(generations)
+        terminal_reason = terminal_reason or 'preset_complete'
         manifest = dict(schema_version=1, run_id=self.run_id, generation_id=generation_id,
                         stage=self.stage, partial=partial, terminal_reason=terminal_reason,
                         provenance=self.provenance, images=entries)
-        try:
-            previous = read_manifest(self.prefix+'_manifest.json')
-            manifest['previous_generation'] = dict(run_id=previous['run_id'], generation_id=previous['generation_id'],
-                manifest=os.path.relpath(generations/previous['run_id']/previous['generation_id']/'manifest.json', root))
-        except FileNotFoundError:
-            manifest['previous_generation'] = None
-        # Keep the generation's own manifest immutable for later inspection and rollback.
-        with open(generation/'manifest.json', 'x') as stream:
-            json.dump(manifest, stream, indent=2, allow_nan=False)
-            stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
-        _sync_dir(generation)
+        pointer = self.store.descriptor(previous_good) if previous_good else None
+        manifest['previous_generation'] = manifest['previous_good_generation'] = pointer
+        manifest['storage_plan'] = dict(maximum_retained_generations=2,
+            maximum_generation_bytes=self.store.maximum_bytes,
+            estimated_new_generation_bytes=self.store.estimated_new_bytes,
+            maximum_metadata_bytes=MAX_METADATA_BYTES)
+        self.store.seal(generation, manifest)
         limits.hold()
         try:
             while self.pending:
@@ -199,14 +217,18 @@ class Outputs:
                     raise
                 self.done.append(self.pending.pop(0))
                 self.tell(image=path)
+            self.staging_bytes = 0
             _sync_dir(root)
             manifest_path = self.prefix+'_manifest.json'
             atomic_json(manifest_path, manifest)
             self.current = {str(root/e['export']):dict(source=str(root/e['path']), size=e['size']) for e in entries}
+            self.disk_report = self.store.published(manifest)
+            self.disk_report.update(staging_bytes=0, observed_peak_staging_bytes=self.observed_peak_staging_bytes)
+            self.tell(disk_storage=self.disk_report)
             self.receipt = dict(run_id=self.run_id, generation_id=generation_id, stage=self.stage,
                                 manifest=manifest_path, manifest_sha256=digest(manifest_path),
                                 partial=partial, terminal_reason=terminal_reason, images=entries,
-                                previous_generation=manifest['previous_generation'])
+                                previous_generation=pointer, previous_good_generation=pointer)
             self.tell(output_generation=self.receipt)
             return self.receipt
         finally:
@@ -219,6 +241,15 @@ class Outputs:
             except FileNotFoundError:
                 pass
         self.pending = []
+        self.staging_bytes = 0
+        if self.store is not None and self.store.prepared:
+            try:
+                self.disk_report = self.store.discard()
+            except (OSError, ValueError, KeyError) as error:
+                self.disk_report = dict(self.store.report, failure=str(error),
+                                        blocked_entries=list(self.store.blocked), unknown_entries=list(self.store.unknown))
+            self.disk_report.update(staging_bytes=0, observed_peak_staging_bytes=self.observed_peak_staging_bytes)
+            self.tell(disk_storage=self.disk_report)
 
 
 def verify_receipt(receipt, *, run_id, stage, prefix):

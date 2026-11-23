@@ -16,6 +16,9 @@ __pycache__/
 *_usage.json
 *_manifest.json
 *_generations/
+.meshpaint-outputs.lock
+.meshpaint-outputs.json
+.meshpaint-outputs.json.part-*
 *.pid
 *.lock
 *.part-*
