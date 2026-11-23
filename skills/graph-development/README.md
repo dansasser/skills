@@ -2,6 +2,8 @@
 
 Build, validate and operate executable software-development lifecycle graphs. Graph Development combines an opt-in agent workflow with a Python control plane for specifications, decisions, approvals, implementation, verification and recovery. The approved outcome bounds each run while the durable graph can retain unrelated backlog.
 
+If Graph Development is useful to you, [⭐ star the repo on GitHub](https://github.com/dansasser/skills).
+
 Use it when a project needs inspectable artifact lineage, durable state and controlled change across more than a checklist. For a plain PRD, architecture-only diagram, knowledge graph or small understood change without project opt-in, use a narrower workflow.
 
 ## Requirements

@@ -11,13 +11,16 @@ Reusable agent skills published by **Dan Sasser**. Each skill is a self-containe
 
 ## Install a skill
 
-With Node.js 22.20 or newer, install mesh-painting using the tested Skills CLI:
+With Node.js 22.20 or newer, choose a skill using the tested Skills CLI:
 
 ```sh
 npx skills@1.9.0 add dansasser/skills --skill mesh-painting --copy
+
+# Or select Graph Development:
+npx skills@1.9.0 add dansasser/skills --skill graph-development --copy
 ```
 
-Choose the agent you use when prompted. To select Graph Development from a collection revision containing it, use `--skill graph-development` in the same command. This installs the selected skill as independent files. Follow the skill's README to install its runtime dependencies and run an example.
+Run the command for the skill you want, then choose the agent you use when prompted. This installs the selected skill as independent files. Follow the skill's README to install its runtime dependencies and run an example.
 
 See the [installation guide](docs/installation.md) for Codex and Claude Code commands, version pinning, manual installation, compatibility and verification. Each skill documents its own requirements; the Agent Skills format alone does not supply a rendering runtime or guarantee every agent can execute it.
 
