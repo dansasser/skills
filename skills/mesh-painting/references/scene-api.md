@@ -9,6 +9,7 @@ A scene file executes trusted Python with the caller's permissions; resource sup
 - [Coordinates and scale](#coordinates-and-scale)
 - [Camera](#camera)
 - [Meshes](#meshes)
+- [Near-plane clipping](#near-plane-clipping)
 - [Noise and shaping helpers](#noise-and-shaping-helpers)
 - [Random numbers and seeds](#random-numbers-and-seed)
 - [Ground detail](#ground-detail)
@@ -22,7 +23,7 @@ A scene file executes trusted Python with the caller's permissions; resource sup
 
 ## Minimal runnable scene
 
-Save this as `workspace/minimal.py` in a terminal checkout after the README setup. It makes a small ground patch with one material; it is an API example rather than a finished composition.
+After the [README setup](../README.md), set `SKILL_DIR` to the full path of the skill directory and `PYTHON` to the selected environment's Python executable. From your own working directory, save this as `workspace/minimal.py`. It makes a small ground patch with one material; it is an API example rather than a finished composition.
 
 ```python
 import numpy as np
@@ -50,7 +51,7 @@ def build():
 ```
 
 ```sh
-.venv/bin/python scripts/run.py workspace/minimal.py --stage preview --out workspace/out/minimal
+"$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/minimal.py --stage preview --out workspace/out/minimal
 ```
 
 Open `workspace/out/minimal_preview.png`. The complete [lighthouse](../assets/scenes/lighthouse.py) and [moor](../assets/scenes/moor.py) sources show the API used for detailed scenes. Run scenes through the launcher, which seeds the engine and applies limits before calling `build()`.
@@ -68,11 +69,13 @@ Camera(eye=(0, 0, 13.0), bearing=12.0, pitch=3.7, focal=1537.0, focus=185.0, ape
 
 - `eye`: camera position. Height above the sea matters: 1.7 is standing on a beach, 13 is a low clifftop.
 - `bearing`, `pitch`: where it points. Pitch up a few degrees puts the horizon below centre.
-- `focal`: focal length in delivery-image pixels, multiplied by the working scale. At the default 1600-pixel width, 1537 gives about a 55 degree horizontal view. Larger is more telephoto. When changing `Scene.size`, adjust `focal` too if you want to preserve the field of view.
+- `focal`: focal length in pixels at a normalized **1600-pixel-wide frame**. A value of 1537 gives about a 55 degree horizontal view; larger is more telephoto. The renderer uses `working_focal = focal * working_width / 1600`. Changing delivery size or working scale preserves the horizontal field of view. Changing the aspect ratio changes the vertical field of view.
 - `focus`: distance in metres to the sharp plane. Set it to the subject's distance.
 - `aperture`: depth-of-field strength, a plain multiplier with no unit (1 is the default). Blur grows with `abs(1/distance - 1/focus) * 48 * aperture` and is capped, so with focus at 200 m everything nearer than about 40 m is at full blur. If near ground matters, lower `aperture` (0.3 is subtle, 0 is sharp everywhere) or focus closer.
 
-To place something on screen: an object at horizontal angle `a` from the view direction and distance `d` appears `focal * tan(a)` pixels from centre, and a height of `h` metres covers `focal * h / d` pixels.
+Positions and angles must be finite; `eye` must contain three values. `focal` and `focus` must be positive, and `aperture` must be nonnegative. With `sea=True`, the camera must be above z = 0. A vertical view is supported.
+
+To estimate placement on the working canvas, use `working_focal`: an object at horizontal angle `a` appears about `working_focal * tan(a)` pixels from centre. A height of `h` metres at forward depth `d` covers approximately `working_focal * h / d` pixels. Angles in this calculation are radians. See [dimensions and optical scale](limits.md#dimensions-and-optical-scale).
 
 ## Meshes
 
@@ -82,10 +85,12 @@ ms = MeshSet()
 ms.add(V, F, material, orient, attr=None)
 ```
 
-- `V`: (n, 3) vertices. `F`: (m, 3) triangle indices into `V`.
-- `material`: one integer id for the whole mesh, or an array with one id per triangle. Use ids from 2 upward; you choose them. Material IDs and paint-region IDs are separate: map materials to validated paint regions in the `Scene`.
+- `V`: a nonempty `(n, 3)` array of finite vertices, representable as finite float32 values. `F`: an `(m, 3)` integer array of triangle indices into `V`; indices must be in `0..n-1`. Floating-point and boolean index arrays are rejected.
+- `material`: one non-boolean integer ID for the whole mesh, or an integer array with one ID per triangle. IDs may be **0 through 2,147,483,647**. Material IDs and paint-region IDs are separate: only paint regions reserve 0 and 1. Map materials to validated paint regions in the `Scene`.
 - `orient`: `"up"` for terrain, or a point `(x, y, z)` inside the object so normals face away from it.
-- `attr`: optional one number per vertex, interpolated and handed to `shade` (for example height fraction up a tower, used to place bands and windows).
+- `attr`: an optional finite scalar or one finite number per vertex, interpolated and handed to `shade` (for example height fraction up a tower, used to place bands and windows).
+
+`MeshSet.add` validates shapes, indices, materials, attributes and orientation before appending the mesh or committing its geometry counts. An invalid call leaves the mesh set unchanged. The assembled scene must contain vertices and triangles; a sky-only empty mesh is not supported. Shared vertices receive averaged face normals; duplicate vertices at boundaries that need independent planar normals.
 
 Builders:
 
@@ -100,6 +105,16 @@ A ruined or broken wall cannot be made with `lathe`, which always gives complete
 
 A height function must return finite numbers everywhere; `grid_mesh` raises an error otherwise. The usual cause is a root or power of a value that dips slightly below zero, such as `np.sqrt(np.sin(np.pi * t))`: clip first, `np.sqrt(np.clip(np.sin(np.pi * t), 0, 1))`.
 
+Builder inputs are checked before the covered geometry allocations:
+
+- `grid_mesh` needs finite one-dimensional axes with at least two values each, and a callable height function returning the full grid shape. `drop_below` is finite or `None`; geometry admission counts the grid before submerged triangles are removed.
+- `lathe` needs at least two profile rows, nonnegative finite radii, finite heights, valid material IDs and an integer `seg >= 3`.
+- `quad` and `tri` need finite three-dimensional points. `beam` also needs distinct endpoints and positive finite width.
+- `scatter` needs finite `(n, 3)` points and a valid template mesh. Scale is positive and finite; yaw is finite when supplied; jitter is finite and nonnegative. Scale and yaw may be scalars or one value per instance.
+- `blades` needs integer `n >= 1`, positive finite height and width, finite lean and nonnegative finite spread.
+
+These checks do not predict every array that arbitrary scene Python can allocate. Let `meshpaint.limits.LimitExceeded` reach the launcher instead of catching it to continue building.
+
 A terrain patch must not end inside the frame while still above water, or its cut edge shows as a straight wall. Either extend it past the frame or subtract a term that sinks it below z = 0 before the patch boundary.
 
 One terrain patch can carry several materials: compute an id per triangle from where it lies, for example `c = V[F].mean(1); M = np.where(on_the_island(c[:, 0], c[:, 1]), ROCK, SAND)`, and pass `M` as the material. This avoids a rectangular material boundary at the patch edge.
@@ -107,6 +122,14 @@ One terrain patch can carry several materials: compute an id per triangle from w
 Where a fine patch overlaps a coarse one, the coarse one pokes through because its triangles cut corners. Lower the coarse patch's height inside the fine patch's footprint (a `smooth` window on x and y) so only the fine one is visible there. Lower it by more than the steepest slope times the coarse step: a metre or two on rolling ground, 10 m or more under a cliff. The fine patch must cover the whole footprint of any feature it is there for; where a cliff or talus runs off onto the coarse patch it shows as facets.
 
 To stand an object on terrain, evaluate the height function at its position and start the object slightly below that height.
+
+## Near-plane clipping
+
+Triangles crossing the camera's near plane are clipped at a forward depth of 1 metre, including reflected geometry. The engine interpolates positions, normals and `attr` along the cut edges and preserves the original face identity for material lookup. Triangles entirely behind the plane are omitted. This prevents a crossing triangle from being discarded wholesale or projected through a zero-depth divisor. Point-light projection clips at 0.2 metres from the light.
+
+For `V` input vertices, `F_front` entirely visible faces and `C` crossing faces, generated buffers are bounded by `V + 2*C` vertices and `F_front + 2*C` triangles. Each generated buffer is checked against the profile's geometry caps before allocation. This can stop a scene whose original mesh fits but whose clipped buffer would exceed a cap. The ordinary all-front path preserves the original geometry arrays.
+
+The usage report's `vertices` and `triangles` remain the original assembled scene counts. When present, `usage.projection_totals` records the most recently checked generated-buffer upper bounds; it is neither a sum across projections nor an exact count of every generated triangle.
 
 ## Noise and shaping helpers
 
@@ -187,13 +210,15 @@ def shade(g):
     return albedo, gloss, emission     # (n, 3), (n,), (n, 3)
 ```
 
-`g` describes every visible surface point: `g.x, g.y, g.z` (world position), `g.N` (normals, n x 3), `g.mat` (material ids), `g.attr` (0 for meshes added without `attr`), `g.dist` (metres from camera), `g.foc`. Fill the three arrays by material with boolean masks: `m = g.mat == ROCK; albedo[m] = ...`.
+`g` describes every visible surface point: `g.P` and `g.x, g.y, g.z` (world position), `g.N` (normals, n x 3), `g.mat` (material IDs), `g.attr` (0 for meshes added without `attr`), `g.dist` (metres from camera), and `g.foc` (working focal length). Fill the three arrays by material with boolean masks: `m = g.mat == ROCK; albedo[m] = ...`.
 
-- `albedo`: base colour in linear light. Real surfaces are darker than you expect: dark rock 0.05 to 0.15, sunlit sandstone 0.25 to 0.4, white paint 0.8. Never 1.0.
-- `gloss`: 0 to 1, how much sky the surface mirrors at a grazing angle. Wet rock 0.4 to 0.8, slate 0.2, dry rock 0.
+- `albedo`: base colour in linear light. Useful starting values are dark rock 0.05 to 0.15, sunlit sandstone 0.25 to 0.4 and white paint 0.8.
+- `gloss`: how much sky the surface mirrors at a grazing angle. Typical values are in 0 to 1: wet rock 0.4 to 0.8, slate 0.2, dry rock 0.
 - `emission`: light the surface gives off. Lit windows around (5, 3, 0.9); a lamp behind glass (15, 10, 4).
 
-Optional `bump(g)` may change `g.N` in place to add relief finer than the mesh. `bump` runs before `shade`, so `g.N` in `shade` is the bumped normal.
+`shade` must return a tuple or list of these three values. Albedo and emission accept a scalar, RGB triple or `(n, 3)` array; gloss accepts a scalar or `(n,)` array. Values must be finite, nonnegative and representable as finite float32. There is no API upper bound of 1; emission above 1 is useful for bright sources. The ranges above are artistic starting points.
+
+Optional `bump(g)` may change or replace `g.N` to add relief finer than the mesh. In the main camera shading pass it runs before `shade`, so `g.N` in `shade` is the bumped normal. The resulting normal array must remain finite with shape `(n, 3)`; keep normals normalized. Its return value is ignored.
 
 Fade fine detail, in `bump` and in `shade`, so it never varies faster than a pixel: multiply it by `g.fade(feature_size)`, which is 1 where a feature of that size in metres covers several pixels and falls to 0 where it would be smaller than one. It allows for distance and for grazing view angles, which matter on level ground seen from a low camera; detail left unfaded there turns into horizontal streaks.
 
@@ -203,20 +228,24 @@ Strokes are masked to a region so edges between surfaces stay crisp. Region 0 is
 
 Both mapping values and `default_region` must be Python or NumPy integers; booleans, floats, strings and out-of-range IDs are rejected after `build()` and before render-buffer allocation. This validation does not bound arbitrary arrays created inside `build()`.
 
-Use dense low IDs. Region masks allocate through the highest rendered ID, including unused intermediate slots. At a 3840 × 2400 canvas, ID 127 implies 128 planes: two float32 mask sets alone require 9,000 MiB, before other buffers. A valid region ID can therefore still exceed the chosen memory ceiling. Give large distinct surfaces separate regions and group small related parts.
+Sparse IDs are supported. The painter compacts the IDs actually present into internal mask slots while preserving the external IDs for stroke directions and reports. If `K` region IDs occur on a working canvas of `A` pixels, the two float32 mask sets require approximately `8*K*A` bytes. A scene using regions 0, 2 and 127 therefore uses three mask slots, not 128. More distinct regions still cost memory; give large distinct surfaces separate regions and group small related parts. Resource admission conservatively includes mapped assembled materials and possible sky/sea regions. [Resource planning](limits.md#memory-and-auxiliary-maps)
 
-`no_flip` lists terrain materials. Other materials have their normals turned to face the camera, which lets thin two-sided pieces such as roofs and rails light correctly.
+`stroke_angle` keys are integer region IDs 0–127 and values are finite angles in radians. Painting uses the default `legacy-seven` policy unless `--paint-policy adaptive-v1` is selected. Region masking applies to both policies; [painting policies](painting.md) explains their different work and completion rules.
+
+`no_flip` lists materials whose normals must retain their original orientation, commonly terrain. Other materials have their normals turned to face the camera, which lets thin two-sided pieces such as roofs and rails light correctly.
 
 ## Lights and glows
 
 - `Light(pos, colour=(1.0, 0.72, 0.36), power=55.0, skip_mats=(), transparent_mats=())`: a point light. Its shadow map looks straight down, so it suits a lamp above the ground. `transparent_mats` are materials that do not block it (the glass around it); `skip_mats` are never lit by it (its own housing).
-- `Glow(pos, colour=(1.0, 0.78, 0.42), halo=((0.9, 9), (0.22, 50), (0.05, 230)), beams=(), starburst=(0.55, 16.0))`: screen-space glare. Halo entries are `(strength, radius_in_pixels_at_1600_width)`; starburst is `(strength, length_in_pixels)` or `None`. `beams=((angle, strength), ...)` draws shafts at screen angles in radians.
+- `Glow(pos, colour=(1.0, 0.78, 0.42), halo=((0.9, 9), (0.22, 50), (0.05, 230)), beams=(), starburst=(0.55, 16.0))`: screen-space glare. Halo entries are `(strength, radius_in_pixels_at_1600_width)`; starburst is `(strength, length_in_pixels_at_1600_width)` or `None`. `beams=((angle, strength), ...)` draws shafts at screen angles in radians.
 
 Import both from `meshpaint.scene`. The sun and sky come from the look; `lights` supplies additional point lights and `glows` supplies screen-space glare.
 
+Light and glow positions must be finite three-vectors; colours must be finite, nonnegative RGB triples. Light power, halo strength and beam strength must be nonnegative; halo radii must be positive. Beam angles must be finite. `starburst` is `None` or two finite nonnegative values. Material lists use valid material IDs. Extra point lights consume shadow-map memory and render time; their maps share the bounded [auxiliary-map budget](limits.md#memory-and-auxiliary-maps).
+
 ## Looks
 
-Offsets are measured from the view direction: negative puts the sun to the left, positive to the right. Under about 25 degrees the sun is in frame and the subject is backlit; around 90 it is side light; beyond 90 the sun is behind the camera and lights the faces you see, but shadows fall away from you and show less.
+Offsets are measured from the view direction: negative puts the sun to the left, positive to the right. At the default focal length, offsets within roughly 25 degrees place the sun near the horizontal frame and tend to backlight the subject; actual visibility also depends on pitch and sun elevation. Around 90 degrees gives side light; beyond 90 the sun is behind the camera and lights the faces you see, but shadows fall away from you and show less.
 
 `look="sunset"` (sun offset -20, elevation 0.9) or `"golden_hour"` (offset -104, elevation 7) in the `Scene`, or a custom `look=dict(sun_offset=60, sun_elev=5)`. Override on the command line with `--look NAME` or `--sun OFFSET ELEV`. OFFSET is degrees from the view direction (negative is left of frame) and ELEV is degrees above the horizon. For a level camera and a 1600-wide frame, the horizontal half-angle is about 27 degrees at focal length 1537 and about 18 degrees at focal length 2400. Elevations from about 1 to 10 degrees are what the sky model was tuned for; outside that range, check the preview carefully.
 
@@ -231,15 +260,17 @@ return Scene(meshes=ms, camera=cam, shade=shade, bump=bump, look="golden_hour", 
              no_flip=(ROCK,), lights=[...], glows=[...])
 ```
 
-`size=(1600, 1000)` on the `Scene` sets the delivered image size, written `Scene.size`; the canvas is that size times `--scale`. The canvas, the scene's total vertices and triangles, and the brushstrokes must all fit the run's resource level (`--level`). A mesh helper raises `meshpaint.limits.LimitExceeded` before building an oversized mesh. Let that exception reach the launcher. [Resource levels](limits.md#resource-levels)
+`Scene.size`, defaulting to `(1600, 1000)`, sets the delivered image size. Width and height must be positive non-boolean integers. The working canvas uses `int(width * scale)` by `int(height * scale)`, with scale 1 for preview. Each working dimension must be at least 16, and delivery and working pixel areas must both fit the selected resource level. Geometry and brushstrokes have separate caps. A mesh helper raises `meshpaint.limits.LimitExceeded` before building an oversized mesh; let that exception reach the launcher. [Resource levels](limits.md#resource-levels)
 
 Water and lens settings on the `Scene`:
 
 - `reflections` (default on): the sea mirrors land and structures as well as the sky. Reflections are sharpest in calm water and smear vertically as `sea_state` rises. A reflection needs room: it appears below its object, about as tall as the object looks, so leave water in front of the subject.
 - `clouds`: cloud cover. 0 is a clear sky, 1 (default) broken cloud, 1.5 heavy. Lower it when the cloud layer competes with the subject.
 - `sea_state`: wave height. 0 is mirror calm, 0.3 a calm bay, 1 (default) a breezy open sea, 1.5 rough. Calm water gives long clean reflections and a narrow sun path.
-- `foam`: shore foam, 0 to 1 (default 1). Calm water carries little foam whatever this is set to.
+- `foam`: shore foam, commonly 0 to 1 (default 1). Calm water carries little foam whatever this is set to.
 - `lens_ghosts`: with the sun in frame the lens adds three faint ghost discs on the line from the sun through the image centre, on the far side of centre. Set `False` if they land on the subject, or move the subject off that line.
+
+`clouds`, `sea_state` and `foam` must be finite and nonnegative; the descriptive values above are not enforced upper limits. An explicit `exposure` must be finite and positive. `look` must be a supported name or a mapping containing finite `sun_offset` and `sun_elev` values. The launcher validates the returned scene before allocating render buffers.
 
 Set `sea=False` for a scene with no water; then model ground everywhere the camera can see below the horizon, or the sky will show through. In practice: a fine patch near the camera, coarser patches further out to several kilometres (a 30 m step is enough beyond 2 km), and distant hills or buttes that rise above the horizon line to hide the far edge. Aerial haze is applied automatically with distance and blends far ground toward the horizon colour, so distant patches need shape but little detail.
 

@@ -22,7 +22,7 @@ npx skills@1.9.0 add dansasser/skills --skill mesh-painting --agent claude-code 
 
 The project skill directory is `.claude/skills/mesh-painting/`.
 
-Omit `--agent` to choose an agent interactively. Add `--global` for a user-wide installation; review the destination before replacing an existing skill. The public release checks use isolated project installations and preserve the publisher's existing user-wide copies.
+Omit `--agent` to choose an agent interactively. Add `--global` for a user-wide installation; review the destination before replacing an existing skill.
 
 List the available skills without installing:
 
@@ -30,13 +30,13 @@ List the available skills without installing:
 npx skills@1.9.0 add dansasser/skills --list
 ```
 
-Pin a published skill version:
+Pin a published skill version (the tag below selects the original 0.1.0 release, not unreleased changes):
 
 ```sh
 npx skills@1.9.0 add dansasser/skills@mesh-painting-v0.1.0 --skill mesh-painting --copy
 ```
 
-See the [upstream CLI documentation](https://github.com/vercel-labs/skills/blob/main/docs/commands.md#skills-add) for options and supported agents. Other agent choices depend on their own discovery, tool and runtime support.
+See the [pinned upstream CLI documentation](https://github.com/vercel-labs/skills/blob/v1.9.0/docs/commands.md#skills-add) for options and supported agents. Other agent choices depend on their own discovery, tool and runtime support.
 
 ## Manual installation
 
@@ -53,7 +53,7 @@ Copy the complete `skills/mesh-painting` folder from that checkout into your age
 | Codex | `.agents/skills/mesh-painting/` | `~/.agents/skills/mesh-painting/` | `$mesh-painting` |
 | Claude Code | `.claude/skills/mesh-painting/` | `~/.claude/skills/mesh-painting/` | `/mesh-painting` |
 
-These conventions follow the [Codex skill documentation](https://learn.chatgpt.com/docs/build-skills) and [Claude Code skill documentation](https://code.claude.com/docs/en/skills).
+Keep every supporting file with the skill; installing only `SKILL.md` omits its engine and resources. These conventions follow the [Codex skill documentation](https://learn.chatgpt.com/docs/build-skills) and [Claude Code skill documentation](https://code.claude.com/docs/en/skills).
 
 ## Runtime setup and verification
 
@@ -70,7 +70,9 @@ cp .agents/skills/mesh-painting/assets/scenes/lighthouse.py workspace/lighthouse
 .venv/bin/python .agents/skills/mesh-painting/scripts/run.py workspace/lighthouse.py --look golden_hour --seed 11 --stage preview --out workspace/out/lighthouse
 ```
 
-Open `workspace/out/lighthouse_preview.png`. Follow the [complete mesh-painting workflow](../skills/mesh-painting/README.md#paint-the-lighthouse) for full render and tile inspection, painting and delivery.
+Open `workspace/out/lighthouse_preview.png`. Follow the [general mesh-painting workflow](../skills/mesh-painting/README.md#general-workflow) for full render and tile inspection, painting and delivery.
+
+Default painting uses the preserved `legacy-seven` recipe. Image-dependent `adaptive-v1` painting is opt-in; follow the skill README for controls and honest completed/stopped outcomes. The environment and output-generation protocol are the same for either policy.
 
 Start a fresh agent session in the project and invoke the skill explicitly. Installation/file verification and direct renderer output do not establish that a particular agent session discovered the skill or followed its visual-review workflow; verify those behaviors through normal use.
 

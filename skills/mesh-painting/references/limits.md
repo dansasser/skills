@@ -1,14 +1,16 @@
 # Engine limits and common defects
 
+This reference covers scene limitations, workload admission and process supervision. See [painting policies](painting.md) for stroke decisions and [outputs and recovery](outputs.md) for manifests, checkpoints and file ownership.
+
 ## Scene limitations
 
 | Feature | What the engine supports |
 | --- | --- |
 | Lighting | Shadows receive sky light. Surfaces in shadow can look blue because nearby sunlit surfaces do not contribute bounce light. Point-light shadows cover a cone pointing downwards. |
-| Water and foam | Water lies on the plane at z = 0. Waves perturb the surface shading and blur reflections. Foam follows the shoreline. Open crests, spray and transparent shallows require additional modelling. |
+| Water and foam | Water lies on the plane at z = 0. Waves perturb surface shading and blur reflections. Foam follows the shoreline. Open crests, spray and transparent shallows require additional modelling. |
 | Terrain | A height field can form a steep slope. Use separate triangles or quads for overhangs, caves and arches. |
-| Fine detail | Brushstrokes can smear parts narrower than about three pixels on the full working canvas. Widen features that must survive painting. |
-| Sky | Clouds occupy a flat layer and can stretch towards the horizon. The sky model is tuned for sun elevations of roughly 1–10 degrees. Inspect previews carefully outside that range. |
+| Fine detail | Brushstrokes can smear parts narrower than about three pixels on the working canvas. Widen features that must survive painting and inspect the delivery image after resizing. |
+| Sky | Clouds occupy a flat layer and can stretch towards the horizon. The sky model is tuned for sun elevations of roughly 1–10 degrees. Inspect previews outside that range. |
 | Figures and vegetation | People, animals and trees require custom meshes. Blade tufts work for grass and scrub. [Ground detail](scene-api.md#ground-detail) |
 
 ## Defects and fixes
@@ -26,21 +28,21 @@
 | Smooth plastic-looking rock | Shape ridges and ledges in the mesh, then layer the material colour. |
 | Visible triangular facets | Reduce mesh step near the camera or build a separate fine patch. |
 | Dark subject under a low sun | The `sunset` look backlights the subject. Choose `golden_hour` or override the sun direction for side lighting. |
-| Subject appears out of scale | Check real dimensions and distance. On-screen height in pixels is approximately focal length × object height ÷ distance. |
-| Sky below the horizon | In a scene with `sea=False`, extend the terrain throughout the view. |
-| Small features disappear in the painting | Enlarge those features or increase the working scale within the chosen resource level. |
+| Subject appears out of scale | Check dimensions, forward depth and the normalized camera focal length. [Camera](scene-api.md#camera) |
+| Sky below the horizon | With `sea=False`, extend terrain throughout the view. |
+| Small features disappear in the painting | Enlarge those features or increase working scale within the selected resource level. Compare both working and delivery images. |
 
 ## Time and size
 
-`--out` is a filename prefix; its parent directory is created when needed. Each stage replaces its own finished files only after writing temporary images successfully. Tiles cover the entire working canvas without overlap. [Output names and sizes](../README.md#outputs)
+Preview builds the complete scene and renders at scale 1. Render and paint use the selected scale; paint also performs a render. Reducing scale lowers image work but does not reduce the geometry built by the scene.
 
-Measured on a six-core x86-64 Linux CPU with native C and BLAS/OMP threads set to 1, standard bundled runs took about 9 seconds for preview, 45 seconds for render and roughly three minutes for paint. Paint includes another render. These are condition-bound measurements. Give the calling tool enough time for the chosen stage and profile; high-scale timing is not guaranteed by a standard-scale measurement.
+Runtime depends on geometry, image dimensions, regions, point lights, painting policy, numerical dependencies, active core and host load. The optional native C core accelerates rasterization and brushwork; the Python fallback follows the same workload limits and can take substantially longer. Start fallback work with a small scene and canvas. A larger tool timeout does not raise the launcher's own time ceiling, and raising a resource level does not guarantee completion. There is no automatic retry or profile escalation.
 
-The Python core is much slower. A verified lighthouse fallback uses `--scale 0.25 --tiles 0`, producing a 400 × 250 working canvas and an upscaled 1600 × 1000 delivery image. It loses fine detail. Standard-size Python painting may exceed its time ceiling. [Fallback command](../README.md#performance-and-the-native-core)
+`--out` is a filename prefix, resolved from the caller's working directory. Its parent is created when needed. The authoritative output is the generation selected by `PREFIX_manifest.json`; flat PNG names are compatibility exports. See [outputs and recovery](outputs.md) before treating an existing image as the result of the latest command.
 
 ## Resource levels
 
-A level caps geometry, canvas size, stroke count, address space and wall-clock time. The defaults below use the example scenes’ 1600 × 1000 delivery size.
+A level caps original and generated geometry, pixel areas, painting strokes, renderer address space and elapsed time. The default scales below assume a 1600 × 1000 delivery image.
 
 | Level | Default scale | Vertices | Triangles | Canvas pixels | Brushstrokes | Address space | Time |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -48,74 +50,147 @@ A level caps geometry, canvas size, stroke count, address space and wall-clock t
 | `standard` | 2.4 | 4,000,000 | 4,000,000 | 9,216,000 | 3,000,000 | 5,120 MiB | 600 s |
 | `high` | 3.6 | 8,000,000 | 8,000,000 | 20,736,000 | 6,750,000 | 10,240 MiB | 1,800 s |
 
-- Geometry counts accumulate across the whole scene. Mesh builders check requested counts before allocating. For `grid_mesh`, the check covers the grid before `drop_below` removes submerged triangles.
-- Preview builds the complete scene and renders at scale 1. Render and paint scale both canvas dimensions. At Standard the example canvas is 3840 × 2400.
-- At a delivery width of 1600, the seven passes plan 749,000 strokes at scale 1.2, 2,996,000 at 2.4 and 6,741,000 at 3.6.
-- The launcher applies process limits before loading the scene. The address-space ceiling includes virtual memory reservations. Use `--time-limit` or `--memory-limit` to lower the chosen level’s limits.
-- Standard is the default, including when only `--scale` is specified. Draft suits smaller scenes. The bundled moor has about 2.5 million vertices and needs Standard. Lowering image scale does not reduce geometry counts.
-- Scale must be positive and finite; each working dimension must be at least 16 pixels. The pixel/stroke caps still apply when scale exceeds the profile default for a smaller scene.
-- `--memory-limit` cannot be below 768 MiB or above the profile ceiling. `--time-limit` must be positive, finite and no greater than the profile ceiling.
-- Regions 0 and 1 are reserved; scene regions must be integer IDs 2–127. Prefer dense low IDs: mask allocation extends through the highest rendered ID. [Region memory cost](scene-api.md#paint-regions)
+`standard` is the default, including when only `--scale` is supplied. A profile is a ceiling, not a promised workload size or hardware qualification. A scene can meet the individual geometry and pixel caps and still fail the combined memory estimate or time ceiling.
 
-Scene Python runs with your account's permissions. Limits supervise a trusted workload; they are not a security sandbox. Geometry helpers check counts before covered allocations, but cannot predict every array a scene callback will create. `RLIMIT_AS` bounds process address space, including virtual reservations; it does not reserve physical RAM or impose a total host-memory quota. The supervisor monitors the renderer, requests termination on a wall-clock overrun, escalates if it ignores termination and checks descendant cleanup.
+- Geometry counts accumulate across the whole scene. Covered helpers check requested geometry before allocation; `grid_mesh` checks the grid before `drop_below` removes triangles. Scene-created intermediate arrays remain subject to the process memory limit.
+- Near-plane clipping has separate generated-buffer checks against the same vertex and triangle ceilings. It does not add generated counts to the original scene totals. [Clipping and report counts](scene-api.md#near-plane-clipping)
+- Both delivery and working pixel areas must fit the profile. Auxiliary maps also have bounded dimensions and pixel budgets.
+- `--memory-limit MIB` can only lower the profile ceiling and must be at least 768 MiB. An inherited stricter address-space limit remains effective.
+- `--time-limit SECONDS` must be finite, positive and no greater than the profile ceiling. It limits the whole requested stage, including import, scene building, render, painting and output work.
+- Region IDs 0 and 1 are reserved for sky and sea. Scene region values must be non-boolean integers 2–127. Sparse IDs use compact mask slots. [Paint regions](scene-api.md#paint-regions)
+
+### Dimensions and optical scale
+
+For delivery size `(dw, dh) = Scene.size` and effective scale `s`:
+
+```text
+working_width  = int(dw * s)
+working_height = int(dh * s)
+A = working_width * working_height
+D = dw * dh
+camera_scale  = working_width / 1600
+working_focal = Camera.focal * camera_scale
+```
+
+Preview sets `s = 1`; render and paint use `--scale` or the profile default. Delivery dimensions must be positive integers, scale must be finite and positive, and each working dimension must be at least 16 pixels. Dimensions must fit the PNG/native integer representation. Both `A` and `D` must be at most the profile's canvas-pixel cap; lowering scale cannot make an oversized delivery image admissible.
+
+At Standard, a 1600 × 1000 scene at scale 2.4 uses a 3840 × 2400 working canvas. A scale below 1 makes a smaller working canvas that is upscaled for delivery; it cannot restore detail absent from that canvas. `Camera.focal` is normalized to a 1600-wide frame, so resizing preserves horizontal field of view. Optical scale and painting area have distinct roles.
+
+### Painting work ceilings
+
+The default `legacy-seven` policy retains its seven-pass schedule and historical width-based stroke planning. At delivery width 1600, the default Draft, Standard and High scales plan 749,000, 2,996,000 and 6,741,000 strokes respectively. Those figures describe that policy and width; they are not universal counts for every scene. A tall or narrow canvas can have a different area without changing that width-based plan.
+
+The opt-in `adaptive-v1` policy admits an area-based maximum:
+
+```text
+admitted_strokes = floor(profile_strokes * min(A, profile_pixels) / profile_pixels)
+```
+
+`--max-strokes` may only lower this admitted count. An area that admits fewer than one stroke is rejected. `--max-passes` lowers the adaptive batch guard; it does not select a fixed number of brush passes. Attempted work, including rejected trial batches, consumes the stroke budget. A resource or batch guard is a stopped outcome rather than a claim that the quality target was reached. [Painting policy details](painting.md)
+
+### Memory and auxiliary maps
+
+The renderer performs a conservative address-space admission check after assembling the mesh and before allocating render buffers. It includes imported process address space, mesh/render/paint lifetime groups, an output reserve, and simultaneous sun, point-light and shoreline maps. Actual arrays made by arbitrary callbacks and dependency-specific allocator behaviour are not fully predictable.
+
+The current estimate uses `A` working pixels, `D` delivery pixels, `V` vertices, `T` triangles and `K` possible paint regions:
+
+```text
+B = 48*V + 32*T                         # estimated mesh bytes
+mesh_group   = 3*B
+render_group = B + (204 if sea else 168)*A
+paint_group  = B + (160 + 8*K)*A
+output_reserve = max(16*1024**2, 20*A + 8*D)
+```
+
+`K` conservatively includes the mapped regions of assembled materials, sky and, when enabled, sea. Unused material mappings do not add mask planes to this assembled-scene estimate. The painter allocates masks only for IDs actually rendered: two float32 mask sets cost approximately `8*K_actual*A` bytes. Changing ID 2 to 127 does not by itself increase that count.
+
+Auxiliary maps share the remaining estimated address-space allowance, with a reservation of 32 bytes per admitted map pixel. Each map also obeys the profile pixel cap and an 8192-pixel maximum dimension. Preferred map dimensions are retained when they fit; otherwise they are reduced deterministically. More point lights share this finite allowance rather than receiving unbounded full-size maps. The planned dimensions and estimate appear in `usage.resource_plan`.
+
+These formulas describe the current admission model, not a physical-memory reservation or an exact measured peak. The effective ceiling is the lower of the selected renderer limit and an inherited address-space limit. `RLIMIT_AS` includes virtual reservations; it does not reserve RAM or impose a combined memory quota on the whole host. The operating-system limit remains authoritative if allocation exceeds the estimate. Sampled memory can miss short peaks; resident memory and address space are different measurements.
 
 ## Stopped or failed runs
 
-Read the exit status and `PREFIX_usage.json` together. A startup error or an unwritable report directory may prevent a new report; an existing file may be from an earlier run. Do not infer success from an old image or report.
+Read the exit status, `PREFIX_usage.json` and selected manifest together. A startup error or unwritable report directory may prevent a new report. An old image or report does not establish success for a new run. A completed CLI stage requires a receipt for the current run and stage with verified image files, dimensions and hashes.
 
-| Outcome | How to respond |
+| Outcome | Interpretation and next step |
 | --- | --- |
-| `stopped`, exit 3 | Report the stage, limiting resource, requested or observed use, and ceiling. For geometry limits, use coarser distant meshes or fewer scattered copies. For pixels or strokes, reduce scale or scene dimensions. If the user wants a higher level, obtain their approval before changing it. |
-| Memory or time limit below the geometry caps | Inspect the last stage, peak memory and elapsed time. Check scene-created arrays, active renderer core, point lights and system load where relevant. Report observable figures and identify any open question. |
-| `interrupted`, exit 130 or 143 | A stop was requested. Use the report to identify finished outputs. To stop a background job, invoke the launcher with `--stop` and the same `--out` prefix. |
-| `failed`, exit 1 or another small code | Inspect the traceback or reported exit and last stage. Correct the identified error before retrying. |
-| `failed`, signal exit | Record the signal and last stage. Inspect memory use, the traceback/log and the signal before deciding whether to retry. Preserve the original evidence and report both attempts if a retry is justified. |
+| `completed`, exit 0 | The requested stage produced and verified its required outputs. Check `terminal_reason` and the selected generation. |
+| `stopped`, exit 3 | A reported resource or adaptive work guard ended the job. Inspect `stop`, the last stage, requested or observed use, and the ceiling. Coarsen geometry or reduce image work as appropriate. |
+| `interrupted`, exit 130 or 143 | A real interrupt or stop request was observed. Inspect the selected generation for completed render or partial-paint recovery. |
+| Startup rejection, exit 2 | The invocation, output ownership or initial environment checks were refused. A new usage report may not exist. |
+| `failed`, exit 1 or another code | Inspect `failure` and the log/traceback. Invalid scene data, malformed callback results and output errors require correction before retrying. |
+| `failed`, signal exit | Record the signal and last stage. Preserve the log and memory figures; a signal alone does not identify its cause. |
 
-If a paint stops after rendering, a completed `PREFIX_render.png` can survive. When at least one whole brush pass has completed and the process can save it, `PREFIX_partial.png` records the painting so far, before relief shading and grain. Label it as a partial painting.
+`terminal_reason` distinguishes painting completion (`preset_complete`, `quality_target` or `diminishing_returns`) from endings such as `stroke_budget`, `pass_guard`, `time`, `memory`, `cancelled`, `input_error` and `output_error`. Geometry and pixel stops can name their limiting resource. A completed preview or render uses `preset_complete`; legacy paint completion also uses that reason. Adaptive convergence decisions describe its image metrics, not a guarantee of subjective quality.
 
+Paint selects a completed render before brushwork. If later work stops, that render can remain available. A recoverable partial contains the last completed legacy pass or accepted adaptive batch, before final relief shading and grain. Partial saving is best effort; an early stop, hard kill, memory shortage or disk failure may prevent it. Label it as a partial painting. There is no automatic resume from that PNG. [Recovery details](outputs.md)
 
 ## Prefix ownership and cleanup
 
-A held `PREFIX.lock` identifies ownership across the launcher, supervisor and renderer. Another job with the same prefix exits 2 without replacing the active PID, images or usage report. Different prefixes have independent locks. The lock file remains after release; do not unlink it to force a competing run to start. Reusing a prefix after completion is allowed.
+A held `PREFIX.lock` coordinates the launcher, supervisor and renderer. Another active job with the same prefix exits 2. The lock file persists after release; its existence alone does not mean a job is active. Do not unlink it to force a competing run to start.
 
-Use Ctrl+C, or invoke `--stop --out PREFIX` from the same caller directory with the selected interpreter and launcher. The stop path checks process identity and start time to avoid signalling a reused PID. It may report that no matching active process remains. Normal cancellation returns 130 for SIGINT or 143 for SIGTERM; the stop command itself has a separate status from the original job.
+Different prefixes may run concurrently when their stage-specific output filenames are disjoint. Different prefix strings can still claim the same filename; overlapping destinations are refused. Output names must not alias the scene source, painting configuration or control files. The directory coordinator serializes reservation metadata updates, not the whole render. Lock ownership survives a killed launcher while the supervisor or renderer still holds the job's descriptor. See [output ownership](outputs.md).
 
-The supervisor attempts to clean up descendants and reports any it could not stop in `processes_left_running`. Check that field and the process state before starting more work. A persistent `.lock` alone does not mean a process is running.
+Use Ctrl+C, or run the stop command with the same selected interpreter, launcher, caller directory and output prefix:
 
-Image writes are temporary until committed. A failed or interrupted stage discards its unfinished image writes and preserves previously completed files. Paint commits its underlying render before brushwork, so that image can survive a later failure. If a resource limit or memory error occurs after a whole paint pass and there is enough memory to save it, `_partial.png` records the completed-pass checkpoint at delivery size. Saving a partial is best effort; cancellation or a hard kill does not guarantee one. A successful paint removes a stale partial from an earlier attempt. Final image preservation does not imply that every image matches the current scene: check ownership in the report.
+```sh
+"$PYTHON" "$SKILL_DIR/scripts/run.py" --stop --out workspace/out/name
+```
 
-Changing a tile grid or disabling tiles does not remove older tiles with the same prefix. Use a fresh revision prefix to avoid confusing them with current outputs.
+`SKILL_DIR` and `PYTHON` follow the [README setup](../README.md). The stop path checks process identity and start time before signalling, and may report that no matching active process remains. The stop command's status is separate from the original job's exit status. The supervisor normally gives a termination request 20 seconds before forced cleanup; Ctrl+C uses a 10-second grace period. It also enforces the stage deadline externally with a 20-second grace period. Native work may delay a cooperative checkpoint, so these are supervision bounds rather than a promise of an immediately saved partial.
+
+The supervisor attempts to stop descendants and reports remaining PIDs in `processes_left_running`. Inspect that field and actual process state before assuming cleanup completed.
+
+The manifest selects an immutable generation atomically. Compatibility PNGs are exported individually and can be stale or mixed after an export fault. Managed retention protects the selected generation and a prior successful generation, with at most two recognized retained generations after successful pruning. Unknown user entries are preserved and reported; they may prevent safe admission. This does not bound unrelated disk usage. Changing or disabling tiles can leave old flat tile exports; the manifest defines the current set. [Generation retention and compatibility exports](outputs.md)
 
 ## Usage report
 
 | Field | Interpretation |
 | --- | --- |
-| `result` | `completed`, `stopped`, `interrupted` or `failed` |
+| `schema_version`, `run_id` | Report format and identity of the current invocation |
+| `result`, `terminal_reason` | Overall outcome and the reason the stage or policy ended |
 | `level`, `stage`, `scale`, `scene` | Selected profile, requested stage, effective scale and caller-relative scene path |
-| `allowed` | Geometry, pixels, strokes, address-space MiB and wall-clock seconds ceilings |
-| `usage` | Counts, planned/completed strokes, elapsed seconds, last stage, timeout flag and available sampled/OS memory figures in KiB |
-| `stop` | Limit description: stage, resource, allowed amount and requested or observed use; null without a reported limit stop |
-| `failure` | Failure summary when supplied; inspect the log/traceback too |
+| `allowed` | Geometry, pixels, strokes, effective address-space MiB and elapsed-time ceilings |
+| `usage` | Original geometry, admitted/planned and completed work, last stage, elapsed time and available memory measurements |
+| `usage.job_plan` | Resolved delivery and working dimensions, area and optical scale |
+| `usage.resource_plan` | Conservative address-space estimate and bounded auxiliary-map plans |
+| `usage.projection_totals` | Most recently checked clipping-buffer upper bounds, when clipping required a check |
+| `usage.painting` | Policy, admitted/attempted/accepted work, region IDs and adaptive decisions when available |
+| `stop`, `failure` | Resource-stop details or a failure summary; inspect the log too |
+| `provenance` | Captured scene-source hash, resolved settings, runtime/core information and available painting configuration |
+| `stage_complete` | Current-run completion receipt when supplied |
+| `authoritative_generation`, `manifest_error` | Selected manifest and any failure to read it |
+| `disk` | Managed generation storage, retention and unknown-entry accounting when available |
+| `compatibility_exports`, `export_errors` | Whether flat images match the selected generation and any export errors |
 | `memory_ceiling_enforced` | Whether the renderer reported successful address-space-limit enforcement |
-| `images_kept` | Primary images still present, with `written_by_this_run`; this list omits tiles |
-| `images_written_by_this_run` | Newly written image paths, including tiles |
+| `images_kept` | Primary flat images still present, with `written_by_this_run`; this list omits tiles |
+| `images_written_by_this_run` | Newly written flat image paths, including tiles |
 | `processes_left_running` | Descendant PIDs the supervisor could not stop |
 
-Memory sampling may miss short peaks; some early-failure fields may be absent. Address-space and resident-memory figures mean different things. Paths are relative to the launch directory and can include `..` when output is elsewhere. Reports contain local scene/output paths; review them before sharing. They do not contain a scene hash or all CLI settings, so retain the source and command separately for reproducibility.
+Some fields are absent after early failures. Paths are relative to the caller directory and may contain `..`. Provenance records the scene bytes captured for execution, but it is not a bundle of imported modules, external assets or every source dependency. Keep those inputs when reproducing a run. Reports can contain local paths and environment/runtime details; review them before sharing. Cross-version numerical differences can change pixels even with the same seed.
 
 ## Runtime troubleshooting
 
+The supervised CLI requires Linux process operations, enforceable address-space limits, `fork`, signals, file locking, `findmnt`, and procfs visibility for the current PID namespace. Scene Python executes with the caller's permissions; resource supervision is not a security sandbox. Numerical thread settings remain caller-controlled and are recorded when available; resource profiles are not CPU quotas.
+
 | Failure | Check |
 | --- | --- |
-| Dependency import fails | Use the same interpreter for `-m pip install -r requirements.txt` and the launcher |
-| procfs monitoring unavailable | Ensure `findmnt` and procfs for the current PID namespace are available; check the environment permits required Linux process operations |
-| Native compiler or cache rejected | Read the fallback reason; check compiler availability, ownership, permissions, symlink/link checks and trusted directory ancestors. A private temporary native build is attempted before Python fallback |
-| Region validation fails | Use non-boolean Python/NumPy integers 2–127 for mapping values and `default_region` |
-| Region masks exhaust memory | Reassign sparse region IDs densely; reduce scale or scene size if necessary |
-| Geometry stop | Coarsen grids or reduce scattered copies; image scale does not change geometry counts |
-| Pixel or stroke stop | Lower scale or delivery dimensions; a resource profile is an explicit choice |
-| Non-finite heights or image values | Inspect the scene's math, clip square-root/fractional-power inputs, and keep material/bump outputs finite. The image writer rejects NaN/inf instead of silently converting it |
-| Time or memory stop | Inspect the limiting stage and active core, reduce the workload, and account for other host activity |
-| Cancellation or stale output | Check outcome, ownership and cleanup; use a new prefix for a retry |
+| Dependency import fails | Install `requirements.txt` with the same selected interpreter used by the launcher. |
+| procfs monitoring unavailable | Check `findmnt`, the procfs mount and visibility of the current PID namespace. The launcher refuses to run without the required monitoring. |
+| Native compiler or cache rejected | Read the fallback reason; check compiler availability, ownership, permissions and trusted cache ancestors. A private temporary native build is attempted before Python fallback. |
+| Scene or helper validation fails | Use finite arrays of the documented shape, integral in-range indices and materials, and valid callback results. [Scene API](scene-api.md) |
+| Region validation fails | Use non-boolean Python/NumPy integers 2–127 for mapping values and `default_region`. |
+| Region memory estimate exceeds the ceiling | Reduce the number of distinct regions, scale or scene size. Renumbering sparse IDs densely does not save mask planes. |
+| Geometry or generated-clipping stop | Coarsen grids, reduce scattered copies or move near-plane crossings. Image scale does not reduce original geometry counts. |
+| Pixel or stroke stop | Lower working scale or delivery dimensions as appropriate to the named check. Choose a different resource profile explicitly if needed. |
+| Non-finite height, material, bump or image value | Inspect the scene's math, clip square-root/fractional-power inputs, and keep callback results finite. The image writer rejects NaN/inf. |
+| Time or memory stop | Inspect the limiting stage, memory estimate, active core and actual work. Reduce the workload before retrying. |
+| Cancellation, stale image or export failure | Check current-run outcome, manifest selection, compatibility-export hashes and cleanup. Use a new prefix when preserving separate revisions. |
 
-[Native cache and environment controls](../README.md#cache-and-environment) describe compiler selection, `CC`, `XDG_CACHE_HOME`, `TMPDIR` and `MESHPAINT_NO_NATIVE`.
+### Native cache and environment controls
+
+The engine compiles its bundled `core.c` on first native use. It tries the compiler command in `CC`, then `cc`, `gcc` and `clang`. `CC` is split into command arguments without a shell; compilation uses a bounded subprocess timeout. A usable existing native library avoids recompilation.
+
+The persistent cache is under `XDG_CACHE_HOME`, or the current user's home cache directory when that variable is unset, in `meshpaint/native-v2/<source-hash>/`. The engine checks directory ancestors, ownership, permissions, file type, links and source/library digest receipts before loading it. Cache files are generated outside the skill source. If the primary cache is unavailable, it attempts a private temporary build in Python's temporary directory selection, which honours `TMPDIR` when usable. If no native build can be loaded, the engine prints the reason and uses the Python core.
+
+Set `MESHPAINT_NO_NATIVE=1` on a command to force Python fallback for that run. Compiler/cache controls do not alter resource caps. `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS` and `NUMEXPR_NUM_THREADS` remain caller environment settings; the launcher records available values but does not impose a CPU quota. Select compatible dependency builds with the same interpreter used for the launcher. See the [README setup](../README.md) for installation commands.

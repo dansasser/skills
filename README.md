@@ -33,7 +33,7 @@ python3 -m venv .venv
 
 These checks validate skill metadata, the catalog, licenses, relative links and anchors, self-contained resources and common portability/privacy mistakes. They supplement a full source/history review. Each skill also supplies its own runtime checks; see [Mesh Painting verification](skills/mesh-painting/README.md#verification).
 
-GitHub Actions runs collection validation and mesh-painting's default engine checks on Python 3.10 and 3.14. Full slow checks remain available through the skill's documented command.
+The GitHub Actions workflow configures collection validation and mesh-painting's default engine checks on Python 3.10 and 3.14. Full slow checks remain available through the skill's documented command.
 
 ## Contributing and security
 

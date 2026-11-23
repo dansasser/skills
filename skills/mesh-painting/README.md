@@ -1,237 +1,198 @@
 # Mesh Painting
 
-Paint landscapes, coasts and buildings from editable Python scenes. Mesh Painting builds triangle meshes, renders procedural materials with sunlight, shadows, water and lens effects, then paints the result in seven brushstroke passes. It uses CPU code, without photographs, downloaded textures or an image-generation model.
+Create landscapes, seascapes and building scenes from editable Python code. Mesh Painting builds triangle meshes, shades procedural materials with lighting, shadows and lens effects, then paints the rendered image with brushstrokes. It uses CPU code without photographs, downloaded textures, model weights or an image-generation service.
 
 If Mesh Painting is useful to you, [⭐ star the repo on GitHub](https://github.com/dansasser/skills).
 
-![A striped lighthouse above a rocky headland in evening light](doc/examples/lighthouse_golden_hour.png)
+The reusable agent workflow is in [SKILL.md](SKILL.md). The same renderer runs directly from a terminal. Your scene remains an editable asset: change its geometry, materials, camera or light and make another revision.
 
-*The bundled lighthouse scene, painted at golden hour.*
+## What it does
 
-![A stone cairn rising above golden moor grass](doc/examples/moor_golden_hour.png)
+- Turns an agent-authored or hand-written scene into a composition preview, shaded render and painted image.
+- Provides terrain, mesh builders, procedural materials, ground cover, lights, sky, water and lens controls. The [scene API](references/scene-api.md) defines the supported interfaces.
+- Separates delivery size from the larger working canvas, with tiles for inspecting details at original resolution.
+- Keeps the historical seven-pass recipe as the default `legacy-seven` policy. Opt-in `adaptive-v1` allocates refinement by image/region content and measured progress; its work is not fixed to seven passes.
+- Records source/configuration hashes, resolved settings, runtime/core, resource usage, painting decisions and output generations for comparisons and recovery.
 
-*The bundled moor scene, with layered terrain, scattered grass and stones.*
-
-The reusable skill instructions live in [SKILL.md](SKILL.md). The renderer also runs directly from a terminal. A scene remains ordinary Python source: change its camera, geometry, materials or lights and render another revision.
+Use it for editable still scenes made from meshes and brushwork. Logos, diagrams, charts, text graphics, photo edits and video need different tools. A request for an image-generation model is outside this workflow. Realism depends on modelling, materials, resolution, brushwork and visual revision; the engine does not guarantee a photographic result.
 
 ## Requirements
 
-- **Linux** with procfs mounted for the current PID namespace and `findmnt` from util-linux. The environment must permit process forking, signals, file locking and enforced `RLIMIT_AS` address-space limits. Restricted containers may prevent these operations.
-- **Python 3.10 or newer**, with `venv` and pip available for that interpreter. The tested combinations are listed under [verification](#verification); newer versions still need compatible dependency builds.
-- **NumPy, SciPy and Pillow**, installed from [requirements.txt](requirements.txt).
-- **An image viewer**, or an agent tool that can open PNGs at full resolution. Inspection is part of the workflow.
-- **An optional C compiler**: `cc`, GCC or Clang. The engine compiles its bundled C core on first use. The Python implementation works without a compiler and is much slower. A GPU, model weights and API keys are unnecessary.
+- **Linux**, with procfs describing the current PID namespace and `findmnt` from util-linux. The environment must allow forking, signals, file locking and enforced `RLIMIT_AS` address-space limits.
+- **Python 3.10+**, with venv/pip and compatible builds of **NumPy, SciPy and Pillow** from [requirements.txt](requirements.txt).
+- **A PNG viewer** or agent image-viewing tool. Reviewing the actual preview, render and painted tiles is part of the workflow.
+- **Optional C compiler:** `cc`, GCC or Clang. The bundled C source is compiled on first use into a checked private cache. Without a usable native core, rendering/painting falls back to slower Python.
 
-The default `standard` level permits up to 5,120 MiB of process address space and ten minutes per stage. This is a ceiling, not a reservation of physical RAM. The host needs enough available memory for the scene and its other running programs. See [resource levels and recovery](references/limits.md).
+A GPU and API keys are unnecessary. Dependency installation can need network access; rendering needs no network service. Scene modules execute trusted Python with your account's permissions. Resource supervision limits computation; it does not sandbox file access, network access or malicious code. Review supplied scene files before running them.
 
-Native Windows, macOS and hosted ChatGPT execution have not been verified. Run the engine in a Linux environment that meets these prerequisites.
+The default Standard profile allows up to 5,120 MiB of process address space and 600 seconds per supervised run. Address space is not reserved physical RAM. Use a host with enough available memory for the scene and other work. Native Windows, macOS and hosted execution have not been qualified; the Agent Skills format does not provide a rendering runtime. See [limits and platform boundaries](references/limits.md).
 
-## Get the source
+## Install and set up
+
+Install the complete `mesh-painting` folder from the shared repository; it does not need its own repository. The [collection installation guide](https://github.com/dansasser/skills/blob/main/docs/installation.md) covers the pinned Skills CLI, project/user copies and agent-specific invocation.
+
+For direct terminal use, run the following from the directory where you want the collection checkout:
 
 ```sh
 git clone https://github.com/dansasser/skills.git
-cd skills/skills/mesh-painting
+cd skills
+SKILL_DIR=skills/mesh-painting
 python3 -m venv .venv
+PYTHON=.venv/bin/python
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python scripts/run.py --help
+"$PYTHON" -m pip install -r "$SKILL_DIR/requirements.txt"
+"$PYTHON" "$SKILL_DIR/scripts/run.py" --help
 ```
 
-The thread controls above keep numerical-library concurrency explicit. Use this same `.venv/bin/python` for installation, checks and rendering. If you select a different Python version, use that interpreter to create the environment first. Runtime installation downloads the three declared Python dependencies; rendering itself needs no network service.
+All commands below continue from that **collection root**, with `SKILL_DIR` and `PYTHON` set as above. For an installed skill, resolve its root from the loaded `SKILL.md`, set `SKILL_DIR` accordingly and use the interpreter for your project environment. Keep scene files, environments and outputs outside the installed skill. Quote paths containing spaces and use the same selected interpreter for pip, checks and every render stage.
 
-## Paint the lighthouse
+## General workflow
 
-Run these commands from the repository root. Copy the scene into an ignored workspace so the bundled example stays intact:
+### 1. Build an editable scene
+
+Write a Python module whose `build()` returns a `meshpaint.scene.Scene`. Start with the [minimal scene](references/scene-api.md), then choose geometry, procedural materials, camera and lighting for your subject. The launcher supplies the bundled package on the import path. Use metres, Z up, and `scene_rng(name)` for scene randomness controlled by `--seed`.
+
+Keep your source in a workspace. Bundled lighthouse and moor scenes are examples to copy when useful, rather than templates every subject must follow. Scene delivery size is `(width, height)`; camera optical scale and working resolution have separate meanings. See [dimensions and resource accounting](references/limits.md).
+
+### 2. Preview, render and inspect
+
+For a scene saved as `workspace/scene.py`:
 
 ```sh
-mkdir -p workspace
-cp assets/scenes/lighthouse.py workspace/lighthouse.py
-.venv/bin/python scripts/run.py workspace/lighthouse.py --look golden_hour --seed 11 --out workspace/out/lighthouse --stage preview
+"$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/scene.py --stage preview --look golden_hour --seed 11 --out workspace/out/scene
+"$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/scene.py --stage render --look golden_hour --seed 11 --out workspace/out/scene
 ```
 
-Open `workspace/out/lighthouse_preview.png`. Check framing, proportions, lighting and exposure. Edit `workspace/lighthouse.py` to change the scene, then repeat the preview. Scene files execute Python with your account's permissions: review a scene before running it. The launcher limits rendering resources; it does **not** sandbox file access, network access or malicious code.
+Open `_preview.png` after the first command. Check composition, proportions, exposure and light; revise and preview before running the second command. Preview uses scale 1 and still constructs the complete scene geometry.
 
-When the composition is ready, render at the working resolution:
+After rendering, open `_render.png` and **every emitted render tile at original resolution**. Inspect foreground and background for seams, stretched triangles, floating objects, blur, aliasing and material defects. The default grid is `3x2`, producing six tiles; another valid grid changes that count. Repeat the render and review after a source or settings change.
+
+### 3. Paint and deliver
 
 ```sh
-.venv/bin/python scripts/run.py workspace/lighthouse.py --look golden_hour --seed 11 --out workspace/out/lighthouse --stage render
+"$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/scene.py --stage paint --look golden_hour --seed 11 --out workspace/out/scene
 ```
 
-Open `workspace/out/lighthouse_render.png` and **all six** files from `lighthouse_render_tile_r1c1.png` through `lighthouse_render_tile_r2c3.png`. View each tile at its original resolution. Check foreground and background for mesh seams, floating objects, stretched triangles, excessive blur and material defects. Correct the scene and repeat the render until it is ready.
+Keep the source, seed, camera, look, custom sun, level and scale matched to the inspected render. Painting renders internally again; it does not load the earlier render PNG. Open the delivery `.png`, `_full.png` and every painted tile. Relief shading and grain follow the brushwork; downsampling makes the delivery image.
 
-Then paint using the same scene and settings:
+Deliver the editable scene with the finished images, selected policy/settings and outcome. Explain visible limitations and skipped checks. For revisions, keep earlier source/output under versioned names and preserve camera, seed and unrelated content unless the requested change requires them to change.
 
-```sh
-.venv/bin/python scripts/run.py workspace/lighthouse.py --look golden_hour --seed 11 --out workspace/out/lighthouse --stage paint
-```
+## Painting policies
 
-Painting renders the scene again internally; it does not load the earlier render PNG. Keep the scene, seed, look, sun, level and scale unchanged between the inspected render and paint. Open `lighthouse.png`, `lighthouse_full.png` and every painted tile. Deliver the scene source with the painting.
-
-For the second example, copy `assets/scenes/moor.py` to `workspace/moor.py` and repeat the three commands with `workspace/moor.py` and the output prefix `workspace/out/moor`. Use `standard`: the moor exceeds the geometry caps of `draft`.
-
-### Outputs
-
-These dimensions apply to either bundled 1600 × 1000 scene at the default `standard` scale of 2.4 and default 3 × 2 tile grid. All names below follow the chosen output prefix.
-
-| File suffix | Stage | Size or purpose |
+| Policy | Behaviour | Controls |
 | --- | --- | --- |
-| `_preview.png` | Preview | 1600 × 1000 composition check; preview always uses scale 1 |
-| `_render.png` | Render and paint | 1600 × 1000 shaded scene |
-| `_render_tile_r1c1.png` … `_render_tile_r2c3.png` | Render | Six 1280 × 1200 adjacent crops of the working render |
-| `.png` | Paint | 1600 × 1000 delivery image, downsampled from the full canvas |
-| `_full.png` | Paint | 3840 × 2400 full painted canvas |
-| `_tile_r1c1.png` … `_tile_r2c3.png` | Paint | Six 1280 × 1200 adjacent crops of the painted canvas |
-| `_partial.png` | Best effort after a paint resource stop | 1600 × 1000 checkpoint after a completed pass, before final relief shading and grain; label it unfinished |
-| `_usage.json` | After a supervised stage | Outcome, limits, usage, image ownership and cleanup report |
-| `.pid` | While active | Process identity used by `--stop`; normally removed at completion |
-| `.lock` | Persistent | Output-prefix ownership lock; an idle file is normal |
+| `legacy-seven` — default | Exact historical seven-pass recipe; counts depend on its working-width recipe | Select explicitly with `--paint-policy legacy-seven`; adaptive customization flags are rejected |
+| `adaptive-v1` — opt-in | Bounded batches choose image regions and brush tiers using fixed-reference error/coverage metrics | `--finish`, `--paint-config`, `--max-strokes`, `--max-passes` |
 
-Tiles cover the full working canvas without overlap. Other sizes or tile grids can produce uneven edge tiles. `--tiles 0` disables tile output; use tiles for visual review. The editable scene is the copy you created, not a file exported by the renderer.
-
-Reusing a prefix replaces that stage's completed outputs. A failed run preserves earlier completed images; their presence alone does not prove the new run succeeded. Use `_usage.json` and the command's exit status. `images_kept` describes primary images and whether this run wrote them; `images_written_by_this_run` also includes newly written tiles. See the [report reference](references/limits.md#usage-report).
-
-### Revisions and repeatability
-
-Keep the original scene and output prefix when comparing revisions. For example, copy `workspace/lighthouse.py` to `workspace/lighthouse-v2.py`, edit the copy, and use `--out workspace/out/lighthouse-v2` through preview, render and paint. Keep the same camera and seed unless the requested change calls for changing them.
-
-The default seed is 11. Scene authors should use `scene_rng(name)` for repeatable independent random streams. Record the scene file, its hash, engine revision and complete command alongside important outputs. The usage report records the scene path, but does not record its hash, seed, look, sun or tile grid. Repeated runs in the same environment are tested; images can vary across Python and numerical-library versions, including painted stroke placement.
-
-## Install for an agent
-
-Install this skill from the shared `dansasser/skills` repository with the Skills CLI. The tested CLI version below requires Node.js 22.20 or newer and Git. Run from your working project:
+Opt into adaptive painting with a separate prefix for comparison:
 
 ```sh
-npx skills@1.9.0 add dansasser/skills --skill mesh-painting --copy
+"$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/scene.py --stage paint --look golden_hour --seed 11 --out workspace/out/scene-adaptive --paint-policy adaptive-v1 --finish photographic
 ```
 
-Choose your agent when prompted, or specify `--agent codex` or `--agent claude-code`. `--copy` installs independent files. Add `--global` for a user-wide installation after reviewing its destination. To select this published version, use `dansasser/skills@mesh-painting-v0.1.0` in place of `dansasser/skills`. [Skills CLI options](https://github.com/vercel-labs/skills/blob/main/docs/commands.md#skills-add)
+`photographic` is the adaptive default finish; `painterly` favours larger visible marks. These labels select brush settings, not a realism guarantee. Stroke ceilings depend on working area; useful work also depends on detail, regions, brush tiers and progress. Quality-target and diminishing-returns outcomes are distinct. Hitting a stroke, work-unit, time or memory guard produces a stopped outcome, not an automatically completed painting.
 
-For manual installation, clone the collection and copy its complete `skills/mesh-painting` folder to the appropriate location. Keep `SKILL.md`, scripts, references, assets and the license together. Preserve any existing installation before replacing it.
+Adaptive painting can use fewer strokes while taking longer or looking coarser than legacy. Small detailed targets can exhaust their admitted work. Keep it opt-in while comparing actual images, full-size details and cost. The [painting reference](references/painting.md) gives the versioned JSON fields, defaults, ranges, budget formula, deterministic streams and terminal reasons. A custom configuration must be a regular JSON file no larger than 64 KiB. The CLI `--max-strokes` and `--max-passes` options only lower their resolved guards; JSON settings stay within validated ranges and the selected resource profile.
 
-| Agent | Current project | All projects for your user | Explicit invocation |
-| --- | --- | --- | --- |
-| Codex | `.agents/skills/mesh-painting/` | `~/.agents/skills/mesh-painting/` | `$mesh-painting` |
-| Claude Code | `.claude/skills/mesh-painting/` | `~/.claude/skills/mesh-painting/` | `/mesh-painting` |
+## Command controls
 
-These follow the documented folder conventions for [Codex](https://learn.chatgpt.com/docs/build-skills) and [Claude Code](https://code.claude.com/docs/en/skills). The agent needs command execution in the Linux runtime above and a PNG-viewing tool. Start a fresh session in your project and invoke the skill explicitly.
+| Option | Meaning / default |
+| --- | --- |
+| `--stage preview\|render\|paint` | Default `preview`; render has no brush painting |
+| `--out PREFIX` | Default `out/painting`; keep separate prefixes for comparisons |
+| `--level draft\|standard\|high` | Default `standard`; profile selection is an explicit resource choice |
+| `--scale NUMBER` | Working scale for render/paint: Draft 1.2, Standard 2.4, High 3.6; preview uses 1 |
+| `--look sunset\|golden_hour` | Override the scene's look; otherwise use its setting |
+| `--sun OFFSET ELEV` | Sun angles in degrees relative to view direction; overrides scene/custom look direction |
+| `--seed INTEGER` | Nonnegative seed, default 11 |
+| `--tiles COLSxROWS` | Default `3x2`; `0` disables tiles; at most 1,024 tile images and no empty tiles |
+| `--time-limit SECONDS`, `--memory-limit MIB` | Lower the selected profile's time/address-space ceiling |
+| `--paint-policy`, `--finish`, `--paint-config` | Painting policy and opt-in adaptive configuration |
+| `--max-strokes N`, `--max-passes N` | Lower adaptive attempted-stroke / work-unit guards; these are not requests for extra passes |
+| `--stop` | Request cancellation using the same `--out` prefix; no scene argument needed |
 
-Create the Python environment in your working project and install from the installed skill's requirements. For a Codex project installation:
+Use `--help` for syntax, [limits](references/limits.md) for admission/profile rules and [painting](references/painting.md) for adaptive settings. An invalid or over-budget request does not authorize silently changing the scene, raising a profile or relaunching it.
+
+## Outputs, provenance and recovery
+
+Names follow the chosen prefix. Tile dimensions depend on the working size and grid, including uneven edge divisions.
+
+| Output | Purpose |
+| --- | --- |
+| `_preview.png` | Composition preview at delivery size |
+| `_render.png` | Shaded render at delivery size, also emitted during painting |
+| `_render_tile_rROWcCOL.png` | Full-working-resolution render crops |
+| `.png`, `_full.png` | Painted delivery image and full working canvas |
+| `_tile_rROWcCOL.png` | Full-working-resolution painted crops |
+| `_partial.png` | Best-effort unfinished painting checkpoint before final relief/grain |
+| `_manifest.json`, `_generations/` | Selected authoritative image set and immutable generation images |
+| `_usage.json` | Outcome, limits, settings/source/runtime provenance, painting decisions, image ownership, managed storage and cleanup |
+| `.pid`, `.lock` and coordination state | Active identity and output ownership; persistent idle lock/control files are expected |
+
+**The manifest selects the authoritative generation.** Flat PNGs are compatibility exports. A failed export can leave those files stale or mixed; their existence is not proof the new run succeeded. A completed stage requires the verified stage receipt and matching generation. Check the command exit status, report `result`/`terminal_reason`, selected manifest and whether an image was written by this run.
+
+Successful managed retention keeps at most two generations: the selected image set and its true previous complete-good set when one exists. Partial/render-ready intermediates do not displace the previous good output. Unknown user files are preserved and reported; managed history bounds do not bound arbitrary user files or compatibility exports. Blocked cleanup can leave extra data and causes a reported failure rather than unsafe deletion. Overlapping active output sets are refused, while disjoint jobs can run concurrently. Keep control files in place.
+
+Ctrl+C requests cancellation. To stop a background run:
 
 ```sh
-python3 -m venv .venv
-export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
-.venv/bin/python -m pip install -r .agents/skills/mesh-painting/requirements.txt
+"$PYTHON" "$SKILL_DIR/scripts/run.py" --stop --out workspace/out/scene
+```
+
+A new partial is best effort: forced termination, memory exhaustion or output failure can prevent it. A partial is not a finished image or a resumable full-state checkpoint; **resume is not implemented**. Reports can also be absent after early failures. The [output/recovery reference](references/outputs.md) defines reports, generations, storage, stale exports and interruption boundaries.
+
+## Bundled examples
+
+The lighthouse and moor show particular scenes; their dimensions, stroke counts and brushwork do not define the general interface.
+
+```sh
 mkdir -p workspace
-cp .agents/skills/mesh-painting/assets/scenes/lighthouse.py workspace/lighthouse.py
-.venv/bin/python .agents/skills/mesh-painting/scripts/run.py workspace/lighthouse.py --look golden_hour --seed 11 --stage preview --out workspace/out/lighthouse
+cp "$SKILL_DIR/assets/scenes/lighthouse.py" workspace/lighthouse.py
+"$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/lighthouse.py --stage preview --look golden_hour --seed 11 --out workspace/out/lighthouse
+"$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/lighthouse.py --stage render --look golden_hour --seed 11 --out workspace/out/lighthouse
+"$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/lighthouse.py --stage paint --look golden_hour --seed 11 --out workspace/out/lighthouse
 ```
 
-Use `.claude/skills/mesh-painting` for a Claude Code project installation. Continue with render and paint using that same project interpreter and installed launcher. Keep editable scenes and output in the project, outside the skill. The full workflow above runs from the skill's source folder; these installed commands resolve its resources from the agent's skill directory instead.
+Inspect between stages as described above. Both bundled scenes have delivery size 1600 × 1000. At Standard scale 2.4, the working canvas is 3840 × 2400 and a `3x2` grid gives six 1280 × 1200 tiles. For the moor, copy `assets/scenes/moor.py` into the workspace and use a different prefix. Its geometry exceeds Draft even at low scale; use Standard.
 
-Try: “Use mesh-painting to paint a rocky coast at golden hour. Keep the scene editable and inspect the preview and every render tile before painting.” Source relocation, installer file placement and direct renderer output are separate from fresh-agent discovery and workflow acceptance; verify the latter in the agent session you use.
+![A striped lighthouse above a rocky headland in evening light](doc/examples/lighthouse_golden_hour.png)
 
-## Command reference
+*Bundled lighthouse example, golden-hour lighting and legacy painting.*
+
+![A stone cairn rising above golden moor grass](doc/examples/moor_golden_hour.png)
+
+*Bundled moor example, golden-hour lighting and legacy painting.*
+
+For a bounded Python-fallback check, use the lighthouse at scale 0.25 without tiles:
 
 ```sh
-.venv/bin/python scripts/run.py --help
+MESHPAINT_NO_NATIVE=1 "$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/lighthouse.py --stage paint --look golden_hour --seed 11 --scale 0.25 --tiles 0 --out workspace/out/lighthouse-python
 ```
 
-| Option | Meaning |
-| --- | --- |
-| `SCENE` | Python module defining `build() -> Scene`; paths resolve from the caller's directory |
-| `--out PREFIX` | Output filename prefix, default `out/painting`; parent directories are created |
-| `--stage preview\|render\|paint` | Default `preview` |
-| `--level draft\|standard\|high` | Resource profile, default `standard` |
-| `--scale NUMBER` | Positive finite working scale for render/paint; both dimensions scale and all profile caps still apply |
-| `--look sunset\|golden_hour` | Override the scene's look |
-| `--sun OFFSET ELEV` | Override the sun in degrees from viewing direction and above the horizon; takes precedence over `--look` |
-| `--tiles COLSxROWS` | Crop grid, default `3x2`; `0` disables crops |
-| `--seed INTEGER` | Procedural seed, default 11 |
-| `--time-limit SECONDS` | Lower the chosen profile's wall-clock ceiling |
-| `--memory-limit MIB` | Lower its address-space ceiling; minimum 768 MiB |
-| `--stop` | Stop the active run owning `--out`; no scene argument needed |
-
-Arguments containing spaces must be quoted. The launcher finds its package relative to itself; the current directory need not be the skill directory. A custom scale can exceed a profile's default scale for a small scene if its pixel and stroke counts still fit the profile.
-
-To stop a background run, use the same output prefix from the same working directory:
-
-```sh
-.venv/bin/python scripts/run.py --stop --out workspace/out/lighthouse
-```
-
-Ctrl+C also requests cancellation. Another run using the same prefix is refused with exit 2 while ownership is active; different prefixes can run independently, subject to host resources. Keep the `.lock` file in place. [Cancellation, recovery and reports](references/limits.md#stopped-or-failed-runs)
-
-## Performance and the native core
-
-The bundled examples were measured on a six-core x86-64 Linux CPU, with native C enabled and `OPENBLAS_NUM_THREADS=1` and `OMP_NUM_THREADS=1`. Observed standard runs took about 9 seconds for preview, 45 seconds for render and roughly three minutes for paint, including its internal render. Other verification jobs shared the host during those measurements. These are measurements, not deadlines or performance guarantees. Hardware, scene density, dependencies, compilation and other jobs affect timing.
-
-At standard size the engine lays 2,996,000 strokes. Raising scale increases canvas area, stroke count and memory. Preview still builds all scene geometry. The moor has about 2.5 million vertices and 1.7 million triangles; reducing only the image scale will not reduce those counts.
-
-If C is unavailable, begin with a small working canvas. This tested fallback paints a coarse 400 × 250 canvas, upscales the delivery image to 1600 × 1000 and writes no tiles:
-
-```sh
-MESHPAINT_NO_NATIVE=1 .venv/bin/python scripts/run.py workspace/lighthouse.py --look golden_hour --seed 11 --stage paint --scale 0.25 --tiles 0 --out workspace/out/lighthouse-python
-```
-
-It is a fallback check with visibly reduced detail. Full standard painting on the Python core can exceed the default time limit. The [limits reference](references/limits.md#resource-levels) explains profile selection and reductions.
-
-### Cache and environment
-
-The native cache is under `meshpaint/native-v2/<core-source-sha256>/` inside `XDG_CACHE_HOME`, or the user's default `.cache` directory. It contains `core.so`, `core.json` and `build.lock`. Private cache directories use mode 0700 and files 0600. The loader checks directory ancestry, ownership, permissions, links, source/build receipts and library hashes, coordinates builds with a lock and loads a verified file descriptor. Unsafe primary caches fall back to a new private temporary directory; if a trusted native build cannot be loaded, the engine uses Python. Old predictable temporary caches are not reused.
-
-| Variable | Effect |
-| --- | --- |
-| `CC` | Compiler command tried first, then `cc`, `gcc`, `clang`; shell-style tokenization supports compiler arguments and quoted paths containing spaces |
-| `XDG_CACHE_HOME` | Cache parent; use a trusted user-owned location with secure ancestors |
-| `MESHPAINT_NO_NATIVE=1` | Force Python rasterization and strokes |
-| `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` | Numerical-library thread controls; the launcher honors caller values; the checker defaults them to 1 when unset |
-| `TMPDIR` | Standard Python temporary-directory selection; the native loader still requires trusted directory ancestry |
-| `MESHPAINT_SLOW=1` | Enable slow checks, equivalent to `tools/check.py --slow` |
-
-If a cache is rejected, inspect the printed reason and directory ownership/permissions. Do not make shared directories writable to bypass the checks. No compiled library is bundled in the repository.
-
-## Write a scene
-
-A scene module exposes `build()` returning a `meshpaint.scene.Scene`. The launcher supplies the bundled package on the import path. See the [scene API](references/scene-api.md) for a runnable minimal scene, camera coordinates, geometry builders, material and bump callbacks, lights, water, deterministic randomness and paint-region IDs.
-
-Start with [lighthouse.py](assets/scenes/lighthouse.py) for coastal geometry, structures and lamps, or [moor.py](assets/scenes/moor.py) for terrain, grass and stones. Region IDs must be integers from 2 through 127; dense low IDs keep mask memory down.
-
-## Troubleshooting
-
-| Symptom | Action |
-| --- | --- |
-| Missing NumPy, SciPy or Pillow | Install requirements with the same interpreter used for the launcher; check `.venv/bin/python -m pip --version` |
-| Cannot create the virtual environment | Install your distribution's venv/pip support for the selected Python, then recreate it |
-| procfs or supervision error | Check `findmnt`, a procfs mount for the current PID namespace, and permission to fork, signal and enforce address-space limits |
-| Native compiler/cache error or very slow paint | Read the native fallback reason; install a C compiler or choose a trusted cache location; verify a small Python fallback first |
-| Invalid region | Use Python or NumPy integers 2–127 for `regions` and `default_region`; booleans are invalid |
-| Exit 3 / `stopped` | Read the report's limiting resource and stage; reduce geometry, scene size or scale as appropriate; raising a level is an explicit resource choice |
-| Traceback / `failed` | Correct the reported scene or environment error; non-finite values are rejected before image conversion |
-| Exit 130/143 / `interrupted` | Check preserved images and the cleanup report; retry with a new prefix after the old run exits |
-| Earlier image is still present | Check `result` and `written_by_this_run`; preserved files can predate this attempt |
-| Visual defects | Consult [known limits and modelling fixes](references/limits.md#scene-limitations); inspect the underlying render before changing brushwork |
+This deliberately lowers detail. Python-core painting at full Standard scale can exceed the time limit. See [runtime/cache controls](references/limits.md).
 
 ## Verification
 
 ```sh
-.venv/bin/python tools/check.py
-.venv/bin/python tools/check.py --slow
+"$PYTHON" "$SKILL_DIR/tools/check.py"
+"$PYTHON" "$SKILL_DIR/tools/check.py" --slow
 ```
 
-The first runs the default checks; the second enables full-size, performance and process-control checks and can take around 17 minutes on the measured host. They use the selected interpreter and exit nonzero on failures. Select tests with `--test NAME`; use `--help` for syntax.
+The default suite explicitly skips slow cases. `--slow` enables full-size, timing, cancellation and recovery checks; runtime depends on the machine. Use `--test NAME` for a focused selection. The checker runs tests with the selected interpreter and exits nonzero on failures or an empty selection.
 
-Before collection packaging, full 125-method suites were run on Linux x86-64 with these combinations. The collection also includes regression checks for interruption during dependency loading and genuine import failures:
+The 192-test default suites passed with these Linux runtime combinations:
 
 | Python | NumPy | SciPy | Pillow | Result |
 | --- | --- | --- | --- | --- |
-| 3.14.4 | 2.5.5 | 1.18.1 | 13.0.0 | 125 passed, no skips |
-| 3.10.22 | 2.2.6 | 1.15.3 | 12.3.0 | 123 passed, 2 reference-profile skips |
-| 3.10.22 | 1.21.6 | 1.7.3 | 8.4.0 | 123 passed, 2 reference-profile skips |
+| 3.14.4 | 2.5.5 | 1.18.1 | 13.0.0 | 182 passed, 10 slow skips |
+| 3.10.22 | 2.2.6 | 1.15.3 | 12.3.0 | 181 passed, 10 slow skips plus one historical-environment skip |
 
-Four historical PNG hashes are enforced only under their exact reference runtime, including zlib 1.3.1. Other environments explicitly skip the two historical-reference methods while retaining portable behavior, parity, safety and repeatability checks. The dependency floors above were exercised; every intermediate Python/library combination has not been tested.
+Separate slow checks covered all ten slow methods, including the four historical PNG references, on the unchanged render/painting math. Historical byte assertions require their recorded numerical/PNG environment; other environments retain portable behavior checks. Requirements declare dependency floors; the table does not certify every intermediate library combination. Independent copies in paths with spaces and native/Python fallback stage outputs were also verified.
 
-The inspected examples have visible limitations: stretched cloud layers, repetitive grass geometry, simplified buildings, saturated bright lamps and coarse brushwork at low scales. See [limits and fixes](references/limits.md). Frozen agent-evaluation prompts are in [evals/cases.md](evals/cases.md); they are evaluation criteria, not a claim of acceptance by every agent product.
+These checks establish specific source/runtime behavior. Fresh agent discovery, trigger classification and a complete visual workflow for every supported client are separate checks; [frozen evaluation cases](evals/cases.md) are criteria, not universal client-acceptance claims.
+
+The renderer has visible limits: simplified/repetitive geometry, terrain intersections, undersampled materials, approximate sky/water/lens effects and coarse brushwork can remain. Inspect underlying renders before trying to fix a modelling defect with more strokes. See [scene limitations and fixes](references/limits.md#scene-limitations). Same-runtime determinism is tested; cross-version/core/platform identical pixels and general photorealism are not promised.
 
 ## License
 
-Published by **Dan Sasser** under the [MIT License](LICENSE). The license covers this skill folder's code, instructions and documentation, bundled scene sources and gallery images. Third-party dependencies retain their own licenses.
+Published by **Dan Sasser** under the [MIT License](LICENSE). It covers this folder's code, instructions, documentation, bundled scene sources and gallery images. Third-party dependencies retain their own licenses.
