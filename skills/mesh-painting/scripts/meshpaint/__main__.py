@@ -37,6 +37,46 @@ KEPT_SUFFIXES = (".png", "_full.png", "_partial.png", "_render.png", "_preview.p
 _STOP_SIGNALS = {signal.SIGTERM, signal.SIGINT}      # held across each fork so none is lost or mishandled in between
 
 
+class JobInputError(ValueError):
+    """A known resolved-job input error; scene/program failures retain tracebacks."""
+
+
+def _source_fingerprint(entry):
+    return dict(device=entry.st_dev, inode=entry.st_ino, bytes=entry.st_size,
+                mtime_ns=entry.st_mtime_ns, ctime_ns=entry.st_ctime_ns)
+
+
+def _scene_snapshot(path):
+    """Quick nonblocking admission only; source reading belongs inside the renderer's limits."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        entry = os.fstat(fd)
+        if not stat.S_ISREG(entry.st_mode):
+            raise ValueError('scene source must be a regular file')
+        return _source_fingerprint(entry)
+    finally:
+        os.close(fd)
+
+
+def _scene_bytes(a):
+    """Read and identify exactly the bytes executed, after resource enforcement is active."""
+    try:
+        fd = os.open(a.scene, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or _source_fingerprint(before) != a.scene_snapshot:
+                raise JobInputError('meshpaint: scene source changed during startup; no scene code was executed')
+            source = stream.read()
+            after = os.fstat(stream.fileno())
+        if (_source_fingerprint(after) != a.scene_snapshot or len(source) != before.st_size or
+                _source_fingerprint(os.stat(a.scene)) != a.scene_snapshot):
+            raise JobInputError('meshpaint: scene source changed during startup; no scene code was executed')
+        a.scene_sha256 = hashlib.sha256(source).hexdigest()
+        return source
+    except OSError as error:
+        raise JobInputError(f'meshpaint: cannot read scene source: {error}') from None
+
+
 def _display_path(path):
     """Present a caller's path relative to the launch directory; keep the path used for I/O intact."""
     if not os.path.isabs(path):
@@ -259,9 +299,7 @@ def _job(a, outs):
     spec = importlib.util.spec_from_file_location("scene_module", a.scene)
     if spec is None or spec.loader is None:
         raise ValueError('meshpaint: scene must be a loadable Python source file')
-    scene_bytes = Path(a.scene).read_bytes()
-    if hashlib.sha256(scene_bytes).hexdigest() != a.scene_sha256:
-        raise ValueError('meshpaint: scene source changed during startup; no scene code was executed')
+    scene_bytes = _scene_bytes(a)
     mod = importlib.util.module_from_spec(spec)
     exec(compile(scene_bytes, spec.origin, 'exec'), mod.__dict__)
     sc = mod.build()
@@ -269,11 +307,14 @@ def _job(a, outs):
     validate_scene(sc)                              # reject unsupported inputs before rendering buffers
     S = 1.0 if a.stage == "preview" else a.scale
     limits.stage("job check")
-    plan = JobPlan.resolve(sc.size, S, stage=a.stage)
+    try:
+        plan = JobPlan.resolve(sc.size, S, stage=a.stage)
+    except ValueError as error:
+        raise JobInputError(f'meshpaint: {error}') from None
     if a.tiles != '0':
         cols, rows = map(int, a.tiles.split('x'))
         if cols > plan.working_size[0] or rows > plan.working_size[1]:
-            raise ValueError(f'meshpaint: tile grid {a.tiles} exceeds working canvas {plan.working_size}')
+            raise JobInputError(f'meshpaint: tile grid {a.tiles} exceeds working canvas {plan.working_size}')
     outs.provenance = _provenance(a, plan, sc)
     outs.tell(provenance=outs.provenance)
     if a.stage == "paint":                           # refuse the painting before the render is paid for
@@ -281,7 +322,10 @@ def _job(a, outs):
             limits.check_strokes("job check (planning the passes)", planned_strokes(S * sc.size[0] / 1600.0))
         else:
             from .painting_policy import stroke_ceiling
-            upper = stroke_ceiling(*plan.working_size, a.max_strokes)
+            try:
+                upper = stroke_ceiling(*plan.working_size, a.max_strokes)
+            except ValueError as error:
+                raise JobInputError(f'meshpaint: {error}') from None
             limits.check_strokes('job check (adaptive allocation)', upper)
     log = pipeline.make_log()
     look = dict(sun_offset=a.sun[0], sun_elev=a.sun[1]) if a.sun else a.look
@@ -396,6 +440,10 @@ def _renderer(a, budget, wfd, parent):
             stop = e.as_dict()
         except MemoryError as e:
             stop = limits.memory_exceeded(e).as_dict()
+        except JobInputError as error:
+            failure_detail = str(error)
+            print(failure_detail, file=sys.stderr)
+            code = 1
         except SystemExit as e:
             if isinstance(e.code, str):
                 print(e.code, file=sys.stderr)
@@ -863,9 +911,10 @@ def main(own_process=False):
             ap.error(f'invalid painting configuration: {error}')
     a.run_id = uuid.uuid4().hex
     try:
-        a.scene_sha256 = digest(a.scene)
-    except OSError as error:
-        ap.error(f'cannot read scene file: {error}')
+        a.scene_snapshot = _scene_snapshot(a.scene)
+        a.scene_sha256 = None                        # calculated with the executed bytes under renderer limits
+    except (OSError, ValueError) as error:
+        ap.error(f'cannot admit scene source: {error}')
     try:
         budget = limits.use(a.level, memory_mb=a.memory_limit, seconds=a.time_limit)
     except ValueError as e:

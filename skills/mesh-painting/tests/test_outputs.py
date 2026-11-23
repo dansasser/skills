@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import subprocess
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -290,6 +291,26 @@ cli.main(own_process=True)
         self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
         self.assertIn('source changed during startup', result.stderr)
         self.assertFalse(marker.exists())
+
+    def test_nonregular_scene_is_refused_before_output_side_effects(self):
+        fifo = self.root/'scene-fifo.py'
+        os.mkfifo(fifo)
+        paths = [fifo]
+        if Path('/dev/zero').exists():
+            paths.append(Path('/dev/zero'))
+        for path in paths:
+            with self.subTest(path=path):
+                started = time.monotonic()
+                command = [sys.executable, '-B', common.RUN, str(path), '--out', self.prefix]
+                try:
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.fail('nonregular scene did not receive a bounded preflight refusal')
+                self.assertEqual(result.returncode, 2, result.stdout+result.stderr)
+                self.assertIn('regular file', result.stderr)
+                self.assertLess(time.monotonic()-started, 2)
+                for suffix in ('.pid', '.lock', '_usage.json', '_preview.png'):
+                    self.assertFalse(Path(self.prefix+suffix).exists())
 
 
 if __name__ == '__main__':

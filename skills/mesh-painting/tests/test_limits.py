@@ -640,11 +640,18 @@ def build():
                 time.sleep(0.1)
             time.sleep(1.5)
             with open(prefix + ".pid") as fh:
-                self.assertEqual(len(fh.read().split()), 2, "the pid file should hold the pid and its start time")
+                identity = fh.read().split()
+            self.assertEqual(len(identity), 3, 'the PID entry holds PID, start time and run identity')
+            self.assertEqual(int(identity[0]), p.pid)
+            with open(f'/proc/{p.pid}/stat') as stream:
+                self.assertEqual(identity[1], stream.read().rsplit(')', 1)[1].split()[19])
+            self.assertRegex(identity[2], r'^[0-9a-f]{32}$')
             r = self.run_engine("--stop", "--out", prefix)
             self.assertEqual(p.wait(timeout=60), 143)                       # it stopped although the scene swallowed the request
             self.assertFalse(os.path.exists(prefix + "_preview.png"))
-            self.assertEqual(self.usage(prefix)["result"], "interrupted")
+            usage = self.usage(prefix)
+            self.assertEqual(usage["result"], "interrupted")
+            self.assertEqual(usage['run_id'], identity[2])
             self.assertFalse(os.path.exists(prefix + ".pid"))
         finally:
             if p.poll() is None:
