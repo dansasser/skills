@@ -73,7 +73,7 @@ After rendering, open `_render.png` and **every emitted render tile at original 
 "$PYTHON" "$SKILL_DIR/scripts/run.py" workspace/scene.py --stage paint --look golden_hour --seed 11 --out workspace/out/scene
 ```
 
-Keep the source, seed, camera, look, custom sun, level and scale matched to the inspected render. Painting renders internally again; it does not load the earlier render PNG. Open the delivery `.png`, `_full.png` and every painted tile. Relief shading and grain follow the brushwork; downsampling makes the delivery image.
+Keep the source, seed, camera, look, custom sun, level and scale matched to the inspected render. Painting renders internally again; it does not load the earlier render PNG. Open the delivery `.png`, `_full.png` and every painted tile. Relief shading and grain follow the brushwork. Resizing makes the delivery image: downsampling a larger working canvas or enlarging a smaller one.
 
 Deliver the editable scene with the finished images, selected policy/settings and outcome. Explain visible limitations and skipped checks. For revisions, keep earlier source/output under versioned names and preserve camera, seed and unrelated content unless the requested change requires them to change.
 

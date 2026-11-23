@@ -54,6 +54,6 @@ Pair the command exit status with the report/run identity: an early refusal can 
 
 ## Reporting
 
-Describe the actual scene, completed stage, selected policy, attempted/accepted stroke counts, terminal reason, elapsed time, settings and runtime/core. Explain that relief shading and grain follow brush painting and that downsampling creates the delivery image. Use the report's source/config hashes and provenance for comparisons; it records resolved settings and deterministic policy decisions, not a promise of cross-platform identical pixels.
+Describe the actual scene, completed stage, selected policy, attempted/accepted stroke counts, terminal reason, elapsed time, settings and runtime/core. Explain that relief shading and grain follow brush painting. Resizing creates the delivery image: downsampling at normal supersampling scales, or enlarging a smaller low-scale canvas. Use the report's source/config hashes and provenance for comparisons; it records resolved settings and deterministic policy decisions, not a promise of cross-platform identical pixels.
 
 State visible weaknesses and whether every emitted tile was inspected. Describe images as made from code without photographs or an image model; do not promise photorealism, a fixed stroke count, seven passes for every policy, automatic recovery or an unverified client/runtime.
