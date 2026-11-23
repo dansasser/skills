@@ -81,7 +81,7 @@ def blur(a, sig):
     """Gaussian blur; wide blurs run on a reduced copy for speed."""
     if sig <= 0:
         return a
-    f = int(sig // 3)
+    f = min(int(sig // 3), *a.shape)
     if f < 2:
         return gaussian_filter(a, sig)
     H, W = a.shape

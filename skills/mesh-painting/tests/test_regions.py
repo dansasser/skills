@@ -139,7 +139,7 @@ class RegionLauncher(unittest.TestCase):
 
 
 class SparseMaskCost(unittest.TestCase):
-    def test_sparse_region_127_retains_a_plane_for_each_id(self):
+    def test_sparse_region_127_allocates_only_used_mask_planes(self):
         from meshpaint import paint
 
         regions = np.full((8, 8), 2, np.int8)
@@ -151,6 +151,7 @@ class SparseMaskCost(unittest.TestCase):
 
         def capture_masks(canvas, height, strokes, ids, masks, bristle, seed):
             captured['masks'] = masks
+            captured['ids'] = ids
             raise MasksCaptured
 
         with patch.object(limits, '_active', limits.Budget()), \
@@ -159,11 +160,11 @@ class SparseMaskCost(unittest.TestCase):
                 paint.paint(np.full((8, 8, 3), 0.5, np.float32), regions, {}, 0.05,
                             0, np.random.default_rng(11), lambda message: None)
         masks = captured['masks']
-        self.assertEqual(masks.shape, (128, 8, 8))
+        self.assertEqual(masks.shape, (2, 8, 8))
         self.assertEqual(masks.dtype, np.dtype(np.float32))
         self.assertTrue(masks.flags.c_contiguous)
-        self.assertEqual(masks.nbytes, 4 * 128 * 8 * 8)
-        self.assertEqual(np.count_nonzero(masks[3:127]), 0)
+        self.assertEqual(masks.nbytes, 4 * 2 * 8 * 8)
+        self.assertTrue(np.all((captured['ids'] >= 0) & (captured['ids'] < 2)))
 
 
 if __name__ == '__main__':
