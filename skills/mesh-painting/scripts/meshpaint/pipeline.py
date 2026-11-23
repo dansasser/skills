@@ -6,7 +6,10 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 
 from . import limits, native, lens, util
-from .geometry import SunShadow, DownShadow
+from .geometry import SunShadow, DownShadow, clip_near
+from .resources import JobPlan, ResourcePlan
+from .scene import validate_scene, validate_shading
+from .validation import finite, indices, mesh_arrays
 from .sky import Sky, LOOKS
 from .util import norm, smooth, blur
 from .water import Shore, shade_sea
@@ -26,25 +29,27 @@ def _mirror_pass(sc, cam, sky, sun_sh, VV, FF, VN, FM, VA, sea_mask, W, H):
     sea pixel, lit by sky and sun (no gloss, no crease shading)."""
     Vr = VV.copy(); Vr[:, 2] = np.maximum(Vr[:, 2], 0)          # the real points, clamped to the waterline
     Vm = Vr.copy(); Vm[:, 2] = -Vm[:, 2]                         # ...and their mirror images
-    xs, ys, zc = cam.project(Vm)
-    fmask = (VV[FF][:, :, 2] > 0.05).any(1) & (zc[FF] > 1.0).all(1)
+    _,_,zc = cam.project(Vm)
+    eligible=(VV[FF][:,:,2]>.05).any(1)
+    projected,faces,attrs,source=clip_near(Vm,FF[eligible],dict(world=Vr,N=VN,A=VA),zc)
+    xs,ys,zc=cam.project(projected)
     with np.errstate(all="ignore"):
-        TID, B1, B2, _ = native.raster(xs, ys, 1 / np.maximum(zc, 1e-3), FF, fmask, W, H)
+        TID, B1, B2, _ = native.raster(xs, ys, 1 / np.maximum(zc, 1e-3), faces, np.ones(len(faces),bool), W, H)
     g = (TID >= 0) & sea_mask
     img = np.zeros((H, W, 3), np.float32)
     if not g.any():
         return img, g.astype(np.float32)
     t_ = TID[g]; b1 = B1[g][:, None]; b2 = B2[g][:, None]; b0 = 1 - b1 - b2
-    f = FF[t_]
-    P = b0 * Vr[f[:, 0]] + b1 * Vr[f[:, 1]] + b2 * Vr[f[:, 2]]
-    N = norm(b0 * VN[f[:, 0]] + b1 * VN[f[:, 1]] + b2 * VN[f[:, 2]])
-    attr = b0[:, 0] * VA[f[:, 0]] + b1[:, 0] * VA[f[:, 1]] + b2[:, 0] * VA[f[:, 2]]
-    mat = FM[t_]
+    f = faces[t_]; world=attrs['world'];normal=attrs['N'];value=attrs['A']
+    P = b0 * world[f[:, 0]] + b1 * world[f[:, 1]] + b2 * world[f[:, 2]]
+    N = norm(b0 * normal[f[:, 0]] + b1 * normal[f[:, 1]] + b2 * normal[f[:, 2]])
+    attr = b0[:, 0] * value[f[:, 0]] + b1[:, 0] * value[f[:, 1]] + b2[:, 0] * value[f[:, 2]]
+    mat = FM[eligible][source[t_]]
     mirror_eye = cam.eye * np.array((1, 1, -1), np.float32)
     dist = np.linalg.norm(P - mirror_eye, axis=1)
     gb = SimpleNamespace(P=P, N=N, mat=mat, attr=attr, dist=dist, foc=cam.foc, x=P[:, 0], y=P[:, 1], z=P[:, 2])
     gb.fade = lambda size: np.clip(cam.foc * size / (dist * 6), 0, 1)
-    alb, _, emit = sc.shade(gb)
+    alb, _, emit = validate_shading(sc.shade(gb),len(P))
     col = alb * (sky.ambient(N) + sky.sun_colour * (np.clip(N @ sky.sun, 0, 1) * sun_sh.lit(P + N * 0.15))[:, None]) + emit
     col = col + (sky.haze - col) * (1 - np.exp(-dist / 2600))[:, None]
     img[g] = col
@@ -53,12 +58,15 @@ def _mirror_pass(sc, cam, sky, sun_sh, VV, FF, VN, FM, VA, sea_mask, W, H):
 
 def render(sc, S, log, look=None):
     """Returns dict(target, regions, depth, horizon_y). target is (H, W, 3) in 0..1 at scale S."""
-    W, H = int(sc.size[0] * S), int(sc.size[1] * S)
+    validate_scene(sc)
+    job=JobPlan.resolve(sc.size,S)
+    limits.active().job_plan=job.as_dict()
+    W,H=job.working_size
     limits.check_pixels("render (canvas)", W, H)      # before any canvas-sized buffer exists
     limits.stage("render (rasterising)")
     rng = util.rng()
     cam = sc.camera
-    cam.setup(W, H, S * sc.size[0] / 1600.0)
+    cam.setup(W,H,job.camera_scale)
     S = cam.S
     lk = look or sc.look
     if isinstance(lk, str):
@@ -68,14 +76,34 @@ def render(sc, S, log, look=None):
     sky = Sky(cam.bearing + lk["sun_offset"], lk["sun_elev"], cam.eye, sc.clouds)
     SUN = sky.sun
     VV, FF, VN, FM, VA = sc.meshes.done()
+    VV,FF=mesh_arrays(VV,FF,'Scene.meshes.done')
+    if not len(FF):
+        raise ValueError('Scene.meshes.done: empty geometry is unsupported')
+    VN=finite(VN,'Scene.meshes.done normals',(len(VV),3))
+    VA=finite(VA,'Scene.meshes.done attributes',(len(VV),))
+    FM=indices(FM,'Scene.meshes.done materials',(len(FF),))
     limits.confirm_mesh(len(VV), len(FF))
+    axis=[0,0,1] if abs(float(SUN[2]))<.999999 else [0,1,0]
+    lx=norm(np.cross(SUN,axis)).astype(np.float32);ly=np.cross(lx,SUN).astype(np.float32)
+    u,v=VV@lx,VV@ly
+    sun_size=(4096,int((v.max()-v.min()+4)/((u.max()-u.min()+4)/4096))+1)
+    xy=VV[:,:2].max(0)-VV[:,:2].min(0)+60
+    shore_cell=max(.25,float(xy.max())/4096)
+    shore_size=(int(xy[0]/shore_cell)+1,int(xy[1]/shore_cell)+1)
+    resource_plan=ResourcePlan.for_scene(sc,job,len(VV),len(FF),sun_size=sun_size,shore_size=shore_size,
+                                         used_materials=np.unique(FM))
+    limits.active().resource_plan=resource_plan.as_dict()
     log(f"meshes: {len(VV)} vertices, {len(FF)} triangles ({'compiled' if native._load() else 'python'} core)")
 
-    xs, ys, zc = cam.project(VV)
+    _,_,zc=cam.project(VV)
+    PV,PF,pa,source=clip_near(VV,FF,dict(N=VN,A=VA),zc)
+    PN,PA,PM=pa['N'],pa['A'],FM[source]
+    xs,ys,zc=cam.project(PV)
     with np.errstate(all="ignore"):
-        TID, B1, B2, _ = native.raster(xs, ys, 1 / np.maximum(zc, 1e-3), FF, (zc[FF] > 1.0).all(1), W, H)
-    sun_sh = SunShadow(VV, FF, SUN)
-    light_sh = [DownShadow(VV, FF, FM, L.pos, L.transparent_mats) for L in sc.lights]
+        TID,B1,B2,_=native.raster(xs,ys,1/np.maximum(zc,1e-3),PF,np.ones(len(PF),bool),W,H)
+    sun_sh=SunShadow(VV,FF,SUN,plan=resource_plan.sun_map)
+    light_sh=[DownShadow(VV,FF,FM,L.pos,L.transparent_mats,plan=p) for L,p in zip(sc.lights,resource_plan.point_maps)]
+    limits.active().auxiliary_maps=[sun_sh.plan.as_dict()]+[sh.plan.as_dict() for sh in light_sh]
     log("rasterised camera view and shadow maps")
     limits.stage("render (shading geometry)")
 
@@ -86,15 +114,15 @@ def render(sc, S, log, look=None):
 
     g = TID >= 0
     t_ = TID[g]; b1 = B1[g][:, None]; b2 = B2[g][:, None]; b0 = 1 - b1 - b2
-    f = FF[t_]
-    P = b0 * VV[f[:, 0]] + b1 * VV[f[:, 1]] + b2 * VV[f[:, 2]]
+    f = PF[t_]
+    P = b0 * PV[f[:, 0]] + b1 * PV[f[:, 1]] + b2 * PV[f[:, 2]]
     keep = P[:, 2] >= 0 if sc.sea else np.ones(len(P), bool)   # anything under the waterline is sea
     gi = np.nonzero(g.ravel())[0]
     g = g.ravel().copy(); g[gi[~keep]] = False; g = g.reshape(H, W)
     P = P[keep]; f = f[keep]; b0, b1, b2 = b0[keep], b1[keep], b2[keep]
-    N = norm(b0 * VN[f[:, 0]] + b1 * VN[f[:, 1]] + b2 * VN[f[:, 2]])
-    attr = b0[:, 0] * VA[f[:, 0]] + b1[:, 0] * VA[f[:, 1]] + b2[:, 0] * VA[f[:, 2]]
-    mat = FM[t_[keep]]
+    N = norm(b0 * PN[f[:, 0]] + b1 * PN[f[:, 1]] + b2 * PN[f[:, 2]])
+    attr = b0[:, 0] * PA[f[:, 0]] + b1[:, 0] * PA[f[:, 1]] + b2[:, 0] * PA[f[:, 2]]
+    mat = PM[t_[keep]]
     dist = np.linalg.norm(P - cam.eye, axis=1)
     gb = SimpleNamespace(P=P, N=N, mat=mat, attr=attr, dist=dist, foc=cam.foc, x=P[:, 0], y=P[:, 1], z=P[:, 2])
     facing = np.sqrt(np.clip(np.abs((N * D[g]).sum(1)), 0.02, 1))          # 1 face-on, small at a grazing angle
@@ -106,7 +134,7 @@ def render(sc, S, log, look=None):
     gb.fade = fade
     if sc.bump:
         sc.bump(gb)
-        N = gb.N
+        N=finite(gb.N,'Scene.bump normals',(len(P),3))
     Dg = D[g]
     N[((N * Dg).sum(1) > 0) & ~np.isin(mat, list(sc.no_flip))] *= -1
     gb.N = N
@@ -117,7 +145,7 @@ def render(sc, S, log, look=None):
     AO *= np.clip(1 - 0.5 * np.clip((dl - blur(dl, 18 * S)) / (0.03 * dl), 0, 1), 0.4, 1)
     ao = AO[g]
 
-    alb, gloss, emit = sc.shade(gb)
+    alb,gloss,emit=validate_shading(sc.shade(gb),len(P))
     col = alb * (sky.ambient(N) * ao[:, None] + sky.sun_colour * (np.clip(N @ SUN, 0, 1) * sun_sh.lit(P + N * 0.15))[:, None])
     for L, sh in zip(sc.lights, light_sh):
         Lv = np.asarray(L.pos, np.float32) - P
@@ -132,10 +160,9 @@ def render(sc, S, log, look=None):
     col += emit
     col = col + (sky.haze - col) * (1 - np.exp(-dist / 2600))[:, None]
     img[g] = col
-    regmap = np.full(int(FM.max()) + 1, sc.default_region, np.int8)
-    for m_, r_ in sc.regions.items():
-        regmap[m_] = r_
-    REG[g] = regmap[mat]
+    materials=np.unique(FM)
+    regmap=np.array([sc.regions.get(int(m),sc.default_region) for m in materials],np.int8)
+    REG[g]=regmap[np.searchsorted(materials,mat)]
     log("geometry shaded")
     limits.stage("render (sky and sea)")
 
@@ -149,7 +176,8 @@ def render(sc, S, log, look=None):
 
     if sc.sea:
         w = (~g) & (D[..., 2] <= 0)
-        shore = Shore(VV, FF)
+        shore=Shore(VV,FF,plan=resource_plan.shore_map)
+        limits.active().auxiliary_maps.append(shore.plan.as_dict())
         mirror = _mirror_pass(sc, cam, sky, sun_sh, VV, FF, VN, FM, VA, w, W, H) if sc.reflections else None
         seac, tw = shade_sea(D[w], cam, sky, shore, sun_sh, rng, (H, W), w, sc.sea_state, sc.foam, mirror, PX[w], PY[w])
         img[w] = seac

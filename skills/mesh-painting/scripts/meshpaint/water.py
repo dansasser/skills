@@ -2,18 +2,28 @@
 import numpy as np
 from scipy.ndimage import distance_transform_edt, map_coordinates, gaussian_filter
 from .util import smooth, norm, tex, noise, ridged
-from . import native
+from . import native, limits
+from .resources import fit_map
 
 
 class Shore:
     """Plan-view map of the coastline, taken from the meshes themselves.
     dist: metres to the nearest land. exposure: 0 in enclosed pools and narrow gaps, 1 on open water."""
 
-    def __init__(self, V, F, cell=0.25, max_cells=4096, open_width=3.0):
+    def __init__(self, V, F, cell=0.25, max_cells=4096, open_width=3.0, plan=None):
         lo = V[:, :2].min(0) - 30; hi = V[:, :2].max(0) + 30
         cell = max(cell, float((hi - lo).max()) / max_cells)
-        self.lo, self.cell = lo, cell
         w = int((hi[0] - lo[0]) / cell) + 1; h = int((hi[1] - lo[1]) / cell) + 1
+        chosen=fit_map('shore',w,h,max_pixels=plan.pixel_limit if plan else limits.active().level.pixels,
+                       max_dimension=plan.max_dimension if plan else 8192)
+        if chosen.reduced:
+            cell=max(float((hi[0]-lo[0])/max(chosen.width-1,1)),float((hi[1]-lo[1])/max(chosen.height-1,1)))
+            w=max(1,int((hi[0]-lo[0])/cell)+1);h=max(1,int((hi[1]-lo[1])/cell)+1)
+            # The selected fit is authoritative even for one-pixel extreme aspects.
+            w=min(w,chosen.width);h=min(h,chosen.height)
+        self.lo,self.cell=lo,cell
+        self.plan=chosen
+        limits.check_auxiliary('shore map',w,h,chosen.pixel_limit)
         top = native.raster((V[:, 0] - lo[0]) / cell, (V[:, 1] - lo[1]) / cell, V[:, 2], F,
                             np.ones(len(F), bool), w, h, init=-1e9, persp=False)[3]
         water = top <= 0

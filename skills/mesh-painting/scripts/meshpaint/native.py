@@ -21,6 +21,7 @@ import tempfile
 import numpy as np
 
 from . import procfs
+from .validation import finite, indices, integer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _lib = None
@@ -322,6 +323,7 @@ def _p(a, t):
 
 def raster(xs, ys, q, faces, fmask, W, H, init=0.0, persp=True):
     """Returns (triangle id, bary1, bary2, q) buffers of shape (H, W)."""
+    xs,ys,q,faces,fmask = _raster_inputs(xs,ys,q,faces,fmask,W,H,init)
     xs = np.ascontiguousarray(xs, np.float64); ys = np.ascontiguousarray(ys, np.float64)
     q = np.ascontiguousarray(q, np.float64)
     faces = np.ascontiguousarray(faces, np.int32); fmask = np.ascontiguousarray(fmask, np.uint8)
@@ -340,6 +342,7 @@ def raster(xs, ys, q, faces, fmask, W, H, init=0.0, persp=True):
 def raster_py(xs, ys, q, faces, fmask, W, H, init=0.0, persp=True, buffers=None):
     """Pure-Python rasteriser; the reference for the compiled one."""
     if buffers is None:
+        xs,ys,q,faces,fmask = _raster_inputs(xs,ys,q,faces,fmask,W,H,init)
         buffers = (np.full((H, W), -1, np.int32), np.zeros((H, W), np.float32), np.zeros((H, W), np.float32),
                    np.full((H, W), init, np.float32))
     TID, B1, B2, Q = buffers
@@ -374,6 +377,7 @@ def raster_py(xs, ys, q, faces, fmask, W, H, init=0.0, persp=True, buffers=None)
 
 def strokes(canvas, height, P, reg, masks, BR, seed):
     """Lay strokes onto canvas in order. P is (n, 11): cx cy angle length width r g b opacity bend bristle."""
+    _stroke_inputs(canvas,height,P,reg,masks,BR,seed)
     H, W = height.shape
     P = np.ascontiguousarray(P, np.float32); reg = np.ascontiguousarray(reg, np.int32)
     lib = _load()
@@ -383,6 +387,60 @@ def strokes(canvas, height, P, reg, masks, BR, seed):
                        _p(masks, ctypes.c_float), _p(BR, ctypes.c_float), ctypes.c_uint32(int(seed) & 0xFFFFFFFF))
         return
     strokes_py(canvas, height, P, reg, masks, BR, seed)
+
+
+def _raster_inputs(xs,ys,q,faces,fmask,W,H,init):
+    integer(W,'raster.width',1);integer(H,'raster.height',1)
+    from . import limits
+    limits.check_auxiliary('raster allocation',W,H)
+    finite(init,'raster.init',())
+    xs=finite(xs,'raster.xs');ys=finite(ys,'raster.ys');q=finite(q,'raster.q')
+    if xs.ndim!=1 or ys.shape!=xs.shape or q.shape!=xs.shape or not len(xs):
+        raise ValueError('raster coordinates/q must be matching nonempty one-dimensional arrays')
+    faces=indices(faces,'raster.faces')
+    if faces.ndim!=2 or faces.shape[1]!=3 or (faces.size and faces.max()>=len(xs)):
+        raise ValueError('raster.faces must be (M,3) integer indices within the coordinate arrays')
+    if len(faces)>2**31-1:
+        raise ValueError('raster face count exceeds native representation')
+    fmask=np.asarray(fmask)
+    if fmask.shape!=(len(faces),) or fmask.dtype.kind not in 'biu' or not np.isin(fmask,(0,1)).all():
+        raise ValueError('raster.fmask must contain one boolean per face')
+    return xs,ys,q,faces,fmask
+
+
+def _stroke_inputs(canvas,height,P,reg,masks,BR,seed):
+    for field,a in [('canvas',canvas),('height',height),('masks',masks),('bristle',BR)]:
+        if not isinstance(a,np.ndarray) or a.dtype!=np.float32 or not a.flags.c_contiguous:
+            raise ValueError(f'strokes.{field} must be a contiguous float32 array')
+        finite(a,'strokes.'+field)
+    if height.ndim!=2 or canvas.shape!=height.shape+(3,):
+        raise ValueError('strokes.canvas and height extents must match (H,W,3)/(H,W)')
+    if not canvas.flags.writeable or not height.flags.writeable:
+        raise ValueError('strokes.canvas and height must be writable')
+    if masks.ndim!=3 or masks.shape[1:]!=height.shape or masks.shape[0]<1:
+        raise ValueError('strokes.masks must be (K,H,W) with matching extents')
+    if BR.shape!=(8192,):
+        raise ValueError('strokes.bristle must have 8192 values')
+    p=finite(P,'strokes.parameters')
+    if p.ndim!=2 or p.shape[1]!=11 or len(p)>2**31-1:
+        raise ValueError('strokes.parameters must have shape (N,11) within native count bounds')
+    if p.size and np.any(np.abs(p)>np.finfo(np.float32).max):
+        raise ValueError('strokes.parameters exceed finite float32 representation')
+    r=indices(reg,'strokes.mask slots')
+    if r.shape!=(len(p),) or (r.size and r.max()>=len(masks)):
+        raise ValueError('strokes.mask slots must be in 0..K-1 and match parameter count')
+    # Legacy colour pickup includes signed Gaussian jitter and HDR values. It is
+    # finite pointer data, not a display-ready RGB contract; preserve those pixels.
+    if p.size and (np.any(p[:,3:5]<=0) or np.any(p[:,8]<0) or np.any(p[:,8]>1) or np.any(p[:,10]<0)):
+        raise ValueError('strokes length/width must be positive; opacity/bristle must be nonnegative, opacity <=1')
+    if p.size:
+        # Bristle table indexing truncates to int32 in both cores. Bounding the
+        # possible local coordinate ratio avoids undefined native conversions.
+        radius=.5*p[:,3]+.5*p[:,4]+np.abs(p[:,9])+2
+        index_bound=(radius/np.maximum(p[:,4],np.finfo(np.float32).tiny)+.5)*np.maximum(.9*p[:,4],3)+8192
+        if not np.isfinite(radius).all() or np.any(index_bound>2**31-2):
+            raise ValueError('strokes length/width/bend exceed safe bristle index representation')
+    integer(seed,'strokes.seed',0,2**64-1)
 
 
 def strokes_py(canvas, height, P, reg, masks, BR, seed):

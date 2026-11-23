@@ -109,9 +109,13 @@ class Budget:
         return time.monotonic() - self.t0
 
     def usage(self):
-        return dict(vertices=self.vertices, triangles=self.triangles, pixels=self.pixels,
+        out = dict(vertices=self.vertices, triangles=self.triangles, pixels=self.pixels,
                     strokes_planned=self.strokes_planned, strokes_done=self.strokes_done,
                     seconds=round(self.elapsed(), 1), last_stage=self.stage, timed_out=self.timed_out, **process_memory())
+        for key in ('job_plan','resource_plan','projection_totals','auxiliary_maps'):
+            if hasattr(self,key):
+                out[key] = getattr(self,key)
+        return out
 
     def allowed(self):
         lv = self.level
@@ -220,6 +224,26 @@ def check_pixels(where, width, height):
     if n > b.level.pixels:
         raise LimitExceeded(where, "pixels", b.level.pixels, requested=n, detail=f"canvas {int(width)} x {int(height)}")
     b.pixels = max(b.pixels, n)
+
+
+def check_projection(where, vertices, triangles):
+    """Bound generated clipping buffers separately; scene totals stay truthful."""
+    b = _active
+    for name, n in [('vertices',int(vertices)),('triangles',int(triangles))]:
+        cap = getattr(b.level,name)
+        if n > cap:
+            raise LimitExceeded(where,name,cap,requested=n,
+                                detail='generated clipping buffers, without changing scene totals')
+    b.projection_totals = dict(vertices=int(vertices),triangles=int(triangles))
+
+
+def check_auxiliary(where, width, height, pixel_limit=None):
+    b = _active
+    if not isinstance(width,int) or not isinstance(height,int) or min(width,height)<1 or max(width,height)>2**31-1:
+        raise ValueError(f'{where}: invalid raster dimensions {width!r} x {height!r}')
+    cap = min(b.level.pixels,b.level.pixels if pixel_limit is None else int(pixel_limit))
+    if width*height > cap:
+        raise LimitExceeded(where,'pixels',cap,requested=width*height,detail='auxiliary raster allocation')
 
 
 def check_strokes(where, planned):

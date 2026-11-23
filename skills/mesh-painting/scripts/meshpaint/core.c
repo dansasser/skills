@@ -19,8 +19,12 @@ void mp_raster(const double *xs, const double *ys, const double *q, const int32_
         if (maxx < 0 || minx >= W || maxy < 0 || miny >= H) continue;
         double ar = (xb - xa) * (yc - ya) - (xc - xa) * (yb - ya);
         if (fabs(ar) < 1e-7) continue;
-        int xm = minx < 0 ? 0 : (int)minx, xM = (int)maxx + 1; if (xM > W) xM = W;
-        int ym = miny < 0 ? 0 : (int)miny, yM = (int)maxy + 1; if (yM > H) yM = H;
+        /* Clamp floating bounds before converting: near-plane projection can be
+           finite while extending far beyond an int32 screen coordinate. */
+        int xm = minx < 0 ? 0 : (int)minx;
+        int xM = maxx >= W - 1 ? W : (int)maxx + 1;
+        int ym = miny < 0 ? 0 : (int)miny;
+        int yM = maxy >= H - 1 ? H : (int)maxy + 1;
         for (int y = ym; y < yM; y++) {
             double py = y + 0.5;
             for (int x = xm; x < xM; x++) {
@@ -52,10 +56,11 @@ void mp_strokes(float *canvas, float *height, int W, int H, int n, const float *
         s ^= s << 13; s ^= s >> 17; s ^= s << 5;
         float off = (float)(s & 8191u);
         float r = 0.5f * L + 0.5f * w + fabsf(bend) + 2.0f;
-        int x0 = (int)(cx - r); if (x0 < 0) x0 = 0;
-        int x1 = (int)(cx + r) + 1; if (x1 > W) x1 = W;
-        int y0 = (int)(cy - r); if (y0 < 0) y0 = 0;
-        int y1 = (int)(cy + r) + 1; if (y1 > H) y1 = H;
+        float left = cx - r, right = cx + r, top = cy - r, bottom = cy + r;
+        int x0 = left <= 0 ? 0 : left >= W ? W : (int)left;
+        int x1 = right >= W - 1 ? W : right <= -1 ? 0 : (int)right + 1;
+        int y0 = top <= 0 ? 0 : top >= H ? H : (int)top;
+        int y1 = bottom >= H - 1 ? H : bottom <= -1 ? 0 : (int)bottom + 1;
         if (x1 <= x0 || y1 <= y0) continue;
         float c = cosf(th), sn = sinf(th);
         float sf = 0.1f * w; if (sf < 0.7f) sf = 0.7f;

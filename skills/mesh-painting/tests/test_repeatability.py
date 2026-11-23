@@ -41,11 +41,20 @@ class FiniteImages(unittest.TestCase):
                         'import numpy as np\n'
                         'from meshpaint import pipeline\n'
                         'from meshpaint.scene import Scene\n'
+                        'from meshpaint.geometry import Camera\n'
+                        'from meshpaint.mesh import MeshSet\n'
                         'def invalid_render(*args, **kwargs):\n'
                         f'    return dict(target=np.full((24, 32, 3), {value}, np.float32))\n'
                         'def build():\n'
                         '    pipeline.render = invalid_render\n'
-                        '    return Scene(meshes=None, camera=None, shade=None, size=(32, 24))\n')
+                        '    meshes = MeshSet()\n'
+                        '    meshes.add(np.array([[0,0,0],[1,0,0],[0,1,0]], np.float32), '
+                        'np.array([[0,1,2]], np.int32), 2, "up")\n'
+                        '    def shade(g):\n'
+                        '        n=len(g.x)\n'
+                        '        return np.full((n,3), .3, np.float32), np.zeros(n, np.float32), np.zeros((n,3), np.float32)\n'
+                        '    return Scene(meshes=meshes, camera=Camera((0,-3,2),0,-10), '
+                        'shade=shade, sea=False, size=(32, 24))\n')
                     prefix = root / f'picture-{index}'
                     previous = {}
                     for suffix in ('.png', '_preview.png', '_render.png', '_full.png'):

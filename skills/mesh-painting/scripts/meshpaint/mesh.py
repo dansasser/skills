@@ -2,6 +2,7 @@
 import numpy as np
 from . import limits
 from .util import norm, scene_rng
+from .validation import finite, indices, integer, mesh_arrays
 
 
 class MeshSet:
@@ -12,11 +13,23 @@ class MeshSet:
     def add(self, V, F, mat, orient="up", attr=None):
         """mat: one id or one per triangle. orient: 'up', or a point the normals should face away from.
         attr: optional per-vertex number handed to the material shader (e.g. height fraction)."""
-        limits.check_mesh("MeshSet.add", len(V), len(F))   # before anything is converted or built
+        V, F = mesh_arrays(V, F, 'MeshSet.add')
+        limits.check_mesh("MeshSet.add", len(V), len(F))
+        m = indices(mat, 'MeshSet.add.material')
+        try:
+            m = np.broadcast_to(m, (len(F),)).astype(np.int32, copy=True)
+            a = np.zeros(len(V), np.float32) if attr is None else np.broadcast_to(
+                finite(attr, 'MeshSet.add.attr'), (len(V),)).astype(np.float32, copy=True)
+        except ValueError as error:
+            raise ValueError('MeshSet.add: material/attr must be scalar or match face/vertex count') from error
+        if isinstance(orient, str):
+            if orient != 'up':
+                raise ValueError("MeshSet.add.orient must be 'up' or a finite 3-vector")
+        else:
+            finite(orient, 'MeshSet.add.orient', (3,))
         V = np.asarray(V, np.float32); F = np.asarray(F, np.int64)
-        limits.commit_mesh(len(V), len(F))
-        if not np.isfinite(V).all():
-            raise ValueError("MeshSet.add: the mesh has vertices that are not finite numbers")
+        if not np.isfinite(V).all() or not np.isfinite(a).all():
+            raise ValueError('MeshSet.add: values overflow the finite float32 representation')
         fn = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
         vn = np.zeros_like(V)
         for k in range(3):
@@ -26,12 +39,17 @@ class MeshSet:
             vn[vn[:, 2] < 0] *= -1
         else:
             vn[(vn * (V - np.asarray(orient, np.float32))).sum(1) < 0] *= -1
+        if not np.isfinite(vn).all():
+            raise ValueError('MeshSet.add: normals overflow the finite representation')
+        limits.commit_mesh(len(V), len(F))
         self.V.append(V); self.F.append(F + self.n); self.N.append(vn)
-        self.M.append(np.broadcast_to(np.asarray(mat, np.int32), (len(F),)).copy())
-        self.A.append(np.zeros(len(V), np.float32) if attr is None else np.asarray(attr, np.float32))
+        self.M.append(m)
+        self.A.append(a)
         self.n += len(V)
 
     def done(self):
+        if not self.V or not any(len(f) for f in self.F):
+            raise ValueError('MeshSet.done: empty geometry is unsupported; add at least one triangle')
         return (np.concatenate(self.V), np.concatenate(self.F).astype(np.int32), np.concatenate(self.N),
                 np.concatenate(self.M), np.concatenate(self.A))
 
@@ -39,10 +57,17 @@ class MeshSet:
 def grid_mesh(xs, ys, height_fn, drop_below=-0.4):
     """Terrain patch from a height function h(x, y). Triangles wholly under `drop_below` are removed.
     The resource level is checked against the full grid, before any are removed."""
-    nx, ny = int(np.size(xs)), int(np.size(ys))
+    xs = finite(xs, 'grid_mesh.xs'); ys = finite(ys, 'grid_mesh.ys')
+    if xs.ndim != 1 or ys.ndim != 1 or len(xs) < 2 or len(ys) < 2 or not callable(height_fn):
+        raise ValueError('grid_mesh: xs/ys must be one-dimensional axes with at least two points; height_fn must be callable')
+    if drop_below is not None:
+        finite(drop_below, 'grid_mesh.drop_below', ())
+    nx, ny = len(xs), len(ys)
     limits.check_mesh("grid_mesh", nx * ny, 2 * max(nx - 1, 0) * max(ny - 1, 0))   # before the grid exists
     X, Y = np.meshgrid(xs, ys)
-    Z = height_fn(X, Y)
+    Z = np.asarray(height_fn(X, Y))
+    if Z.shape != X.shape:
+        raise ValueError(f'grid_mesh: height function must return shape {X.shape}; got {Z.shape}')
     if not np.isfinite(Z).all():
         bad = int((~np.isfinite(Z)).sum())
         raise ValueError(f"grid_mesh: the height function returned {bad} values that are not finite numbers. "
@@ -60,7 +85,15 @@ def grid_mesh(xs, ys, height_fn, drop_below=-0.4):
 def lathe(cx, cy, profile, seg=56):
     """Surface of revolution about a vertical axis. profile = [(radius, z, material)];
     each material applies to the band above its point. Returns V, F, per-triangle materials."""
-    limits.check_mesh("lathe", len(profile) * int(seg), 2 * int(seg) * max(len(profile) - 1, 0))
+    seg = integer(seg, 'lathe.seg', 3)
+    finite((cx, cy), 'lathe centre', (2,))
+    profile = finite(profile, 'lathe.profile')
+    if profile.ndim != 2 or profile.shape[1] != 3 or len(profile) < 2 or np.any(profile[:, 0] < 0):
+        raise ValueError('lathe.profile must contain at least two (nonnegative radius, z, material) rows')
+    # Mixed radius/material rows become a floating array: validate material values before casting.
+    if np.any(profile[:, 2] != np.floor(profile[:, 2])) or np.any(profile[:, 2] < 0) or np.any(profile[:, 2] > 2**31-1):
+        raise ValueError('lathe.profile materials must be nonnegative int32-compatible IDs')
+    limits.check_mesh("lathe", len(profile) * seg, 2 * seg * (len(profile) - 1))
     ang = np.linspace(0, 2 * np.pi, seg, endpoint=False)
     V = np.concatenate([np.stack([cx + r * np.cos(ang), cy + r * np.sin(ang), np.full(seg, z)], 1)
                         for r, z, _ in profile])
@@ -68,15 +101,17 @@ def lathe(cx, cy, profile, seg=56):
     for k in range(len(profile) - 1):
         a = k * seg + np.arange(seg); b = k * seg + (np.arange(seg) + 1) % seg
         F += [np.stack([a, b, a + seg], 1), np.stack([b, b + seg, a + seg], 1)]
-        M += [np.full(2 * seg, profile[k][2])]
+        M += [np.full(2 * seg, int(profile[k][2]), np.int32)]
     return V, np.concatenate(F), np.concatenate(M)
 
 
 def quad(p0, p1, p2, p3):
+    finite((p0,p1,p2,p3), 'quad.points', (4,3))
     return np.array([p0, p1, p2, p3], np.float32), np.array([[0, 1, 2], [0, 2, 3]])
 
 
 def tri(p0, p1, p2):
+    finite((p0,p1,p2), 'tri.points', (3,3))
     return np.array([p0, p1, p2], np.float32), np.array([[0, 1, 2]])
 
 
@@ -94,7 +129,15 @@ def scatter(points, V, F, scale=1.0, yaw=None, jitter=0.0, rng=None):
     All instances share the one `orient` you pass to MeshSet.add (use "up" for ground cover),
     so do not list a scattered material in Scene.no_flip.
     """
-    points = np.asarray(points, np.float32).reshape(-1, 3)
+    points = finite(points, 'scatter.points')
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError('scatter.points must have shape (N, 3)')
+    V, F = mesh_arrays(V, F, 'scatter.template')
+    finite(scale, 'scatter.scale', positive=True)
+    finite(jitter, 'scatter.jitter', (), nonnegative=True)
+    if yaw is not None:
+        finite(yaw, 'scatter.yaw')
+    points = np.asarray(points, np.float32)
     V = np.asarray(V, np.float32); F = np.asarray(F, np.int64)
     n, m = len(points), len(V)
     limits.check_mesh("scatter", n * m, n * len(F))   # before the copies are made
@@ -119,7 +162,12 @@ def blades(n=9, height=0.3, width=0.03, lean=0.45, spread=0.06, rng=None):
     lumps. height, width, spread are metres; lean is how far tips tip outward (0 = upright).
     Returns (V, F) with the base at z = 0.
     """
-    limits.check_mesh("blades", 3 * int(n), int(n))
+    n = integer(n, 'blades.n', 1)
+    finite(height, 'blades.height', (), positive=True)
+    finite(width, 'blades.width', (), positive=True)
+    finite(lean, 'blades.lean', ())
+    finite(spread, 'blades.spread', (), nonnegative=True)
+    limits.check_mesh("blades", 3 * n, n)
     rng = rng or scene_rng("blades")
     a = rng.uniform(0, 2 * np.pi, n)
     h = height * rng.uniform(0.55, 1.0, n)
@@ -138,8 +186,12 @@ def beam(p0, p1, width=0.1):
     """A straight four-sided bar from p0 to p1, `width` metres across: legs, struts, rails,
     posts, masts. Returns (V, F); orient it away from its own midpoint:
     ms.add(*beam(a, b, 0.12), STEEL, tuple((np.add(a, b) / 2)))."""
+    finite(p0, 'beam.p0', (3,)); finite(p1, 'beam.p1', (3,))
+    finite(width, 'beam.width', (), positive=True)
     p0 = np.asarray(p0, np.float32); p1 = np.asarray(p1, np.float32)
     d = p1 - p0
+    if float(np.linalg.norm(d)) == 0:
+        raise ValueError('beam: p0 and p1 must be distinct')
     d = d / (np.linalg.norm(d) + 1e-9)
     ref = np.array((0, 0, 1), np.float32) if abs(d[2]) < 0.9 else np.array((1, 0, 0), np.float32)
     a = np.cross(d, ref); a = a / np.linalg.norm(a) * (width / 2)

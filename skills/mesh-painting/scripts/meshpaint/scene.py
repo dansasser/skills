@@ -2,6 +2,8 @@
 from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Callable, Optional
+import numpy as np
+from .validation import finite, integer, indices
 
 
 def validate_regions(scene):
@@ -12,8 +14,85 @@ def validate_regions(scene):
                              f"(0 and 1 are reserved for sky and sea); got {value!r}")
 
     check(scene.default_region, "Scene.default_region")
+    if not isinstance(scene.regions, dict):
+        raise ValueError('Scene.regions must map material IDs to paint region IDs')
     for material, value in scene.regions.items():
+        integer(material, 'Scene.regions material ID')
         check(value, f"Scene.regions[{material!r}]")
+
+
+def validate_shading(result, n):
+    """Return finite float32 callback arrays; explicitly allow scalar broadcasting."""
+    if not isinstance(result, (tuple, list)) or len(result) != 3:
+        raise ValueError('Scene.shade must return (albedo, gloss, emission)')
+    out = []
+    for field, value, shape in zip(('albedo','gloss','emission'),result,((n,3),(n,),(n,3))):
+        a = finite(value, 'Scene.shade.'+field, nonnegative=True)
+        if a.shape not in ((),shape,(3,) if len(shape)==2 else shape):
+            raise ValueError(f'Scene.shade.{field} must be scalar or shape {shape}; got {a.shape}')
+        a = np.broadcast_to(a,shape).astype(np.float32,copy=False)
+        if not np.isfinite(a).all():
+            raise ValueError(f'Scene.shade.{field} overflows float32')
+        out.append(a)
+    return tuple(out)
+
+
+def validate_scene(scene):
+    if not isinstance(scene, Scene):
+        raise ValueError('build() must return a meshpaint.scene.Scene')
+    validate_regions(scene)
+    if not hasattr(scene.meshes,'done') or not callable(scene.meshes.done):
+        raise ValueError('Scene.meshes must expose done()')
+    if not callable(scene.shade) or (scene.bump is not None and not callable(scene.bump)):
+        raise ValueError('Scene.shade and optional Scene.bump must be callable')
+    from .geometry import Camera
+    if not isinstance(scene.camera,Camera):
+        raise ValueError('Scene.camera must be a Camera')
+    scene.camera.validate()
+    if not isinstance(scene.size,(tuple,list)) or len(scene.size)!=2:
+        raise ValueError('Scene.size must be (width, height)')
+    for x in scene.size:
+        integer(x,'Scene.size',1)
+    if scene.sea and scene.camera.eye[2]<=0:
+        raise ValueError('Scene.camera.eye must be above the sea plane when Scene.sea is enabled')
+    if isinstance(scene.look,str):
+        from .looks import LOOKS
+        if scene.look not in LOOKS:
+            raise ValueError(f'Scene.look is unknown: {scene.look!r}')
+    elif isinstance(scene.look,dict) and {'sun_offset','sun_elev'}<=scene.look.keys():
+        finite(scene.look['sun_offset'],'Scene.look.sun_offset',())
+        finite(scene.look['sun_elev'],'Scene.look.sun_elev',())
+    else:
+        raise ValueError('Scene.look must be a known name or finite sun_offset/sun_elev mapping')
+    for field in ('sea_state','foam','clouds'):
+        finite(getattr(scene,field),'Scene.'+field,(),nonnegative=True)
+    if scene.exposure is not None:
+        finite(scene.exposure,'Scene.exposure',(),positive=True)
+    if not isinstance(scene.stroke_angle,dict):
+        raise ValueError('Scene.stroke_angle must map region IDs to finite angles')
+    for region,angle in scene.stroke_angle.items():
+        integer(region,'Scene.stroke_angle region',0,127)
+        finite(angle,f'Scene.stroke_angle[{region}]',())
+    for material in scene.no_flip:
+        integer(material,'Scene.no_flip material')
+    for light in scene.lights:
+        if not isinstance(light,Light):
+            raise ValueError('Scene.lights entries must be Light values')
+        finite(light.pos,'Light.pos',(3,));finite(light.colour,'Light.colour',(3,),nonnegative=True)
+        finite(light.power,'Light.power',(),nonnegative=True)
+        for material in (*light.skip_mats,*light.transparent_mats):
+            integer(material,'Light material')
+    for glow in scene.glows:
+        if not isinstance(glow,Glow):
+            raise ValueError('Scene.glows entries must be Glow values')
+        finite(glow.pos,'Glow.pos',(3,));finite(glow.colour,'Glow.colour',(3,),nonnegative=True)
+        for amp,radius in glow.halo:
+            finite(amp,'Glow.halo strength',(),nonnegative=True);finite(radius,'Glow.halo radius',(),positive=True)
+        for angle,strength in glow.beams:
+            finite(angle,'Glow.beams angle',());finite(strength,'Glow.beams strength',(),nonnegative=True)
+        if glow.starburst is not None:
+            finite(glow.starburst,'Glow.starburst',(2,),nonnegative=True)
+    return scene
 
 
 @dataclass
