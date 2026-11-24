@@ -1,0 +1,619 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.codex/skills/graph-development/development-graph.run.schema.json",
+  "title": "Development Graph Runtime State",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/runtimeV1"
+    },
+    {
+      "$ref": "#/$defs/runtimeV2"
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": ".*\\S.*"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "checksum": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stringArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
+    },
+    "lease": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "issued_at",
+        "expires_at",
+        "idempotency_key"
+      ],
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "issued_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "approval": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "run_id",
+        "graph_checksum",
+        "node_id",
+        "gate_node_id",
+        "approver",
+        "evidence_digest",
+        "approved_at"
+      ],
+      "properties": {
+        "decision": {
+          "const": "approved"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "graph_checksum": {
+          "$ref": "#/$defs/checksum"
+        },
+        "node_id": {
+          "$ref": "#/$defs/slug"
+        },
+        "gate_node_id": {
+          "$ref": "#/$defs/slug"
+        },
+        "approver": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/checksum"
+        },
+        "approved_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "nodeState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "attempts",
+        "generation",
+        "lease",
+        "approval",
+        "completed_idempotency_keys",
+        "evidence",
+        "last_result"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "planned",
+            "ready",
+            "blocked",
+            "running",
+            "verifying",
+            "verified",
+            "invalidated",
+            "failed",
+            "needs_human",
+            "cancelled"
+          ]
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease": {
+          "$ref": "#/$defs/lease"
+        },
+        "approval": {
+          "$ref": "#/$defs/approval"
+        },
+        "completed_idempotency_keys": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "last_result": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "outcomeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_id",
+        "contract_version",
+        "outcome",
+        "outcome_digest",
+        "requirement_ids",
+        "non_goals",
+        "acceptance_ids",
+        "acceptance_digest",
+        "terminal_node_ids",
+        "authority_evidence",
+        "authority_digest",
+        "impact_policy",
+        "created_at",
+        "actor"
+      ],
+      "properties": {
+        "contract_id": {
+          "$ref": "#/$defs/slug"
+        },
+        "contract_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "outcome": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "outcome_digest": {
+          "$ref": "#/$defs/checksum"
+        },
+        "requirement_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "non_goals": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "acceptance_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "acceptance_digest": {
+          "$ref": "#/$defs/checksum"
+        },
+        "terminal_node_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/slug"
+          }
+        },
+        "authority_evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "authority_digest": {
+          "$ref": "#/$defs/checksum"
+        },
+        "impact_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Limits ungated semantic invalidation per run. The fraction is affected verified enrolled nodes divided by verified enrolled nodes immediately before preview, or 0 when none are verified.",
+          "required": [
+            "max_verified_node_count",
+            "max_verified_node_fraction"
+          ],
+          "properties": {
+            "max_verified_node_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_verified_node_fraction": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "created_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "actor": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "projectionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "path",
+        "checksum"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "checksum": {
+          "$ref": "#/$defs/checksum"
+        }
+      }
+    },
+    "runtimeV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "run_version",
+        "graph_id",
+        "graph_version",
+        "graph_checksum",
+        "status",
+        "created_at",
+        "updated_at",
+        "last_event_sequence",
+        "last_event_hash",
+        "feedback_traversals",
+        "nodes"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "run_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "graph_id": {
+          "$ref": "#/$defs/slug"
+        },
+        "graph_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "graph_checksum": {
+          "$ref": "#/$defs/checksum"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "running",
+            "needs_human",
+            "completed",
+            "cancelled"
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "last_event_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "last_event_hash": {
+          "$ref": "#/$defs/checksum"
+        },
+        "feedback_traversals": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/slug"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/nodeState"
+          }
+        }
+      }
+    },
+    "runtimeV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "run_version",
+        "graph_id",
+        "observed_graph_version",
+        "observed_graph_checksum",
+        "outcome_contract",
+        "projection",
+        "episodes",
+        "status",
+        "created_at",
+        "updated_at",
+        "last_event_sequence",
+        "last_event_hash",
+        "feedback_traversals",
+        "nodes"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "run_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "graph_id": {
+          "$ref": "#/$defs/slug"
+        },
+        "observed_graph_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "observed_graph_checksum": {
+          "$ref": "#/$defs/checksum"
+        },
+        "outcome_contract": {
+          "$ref": "#/$defs/outcomeContract"
+        },
+        "projection": {
+          "$ref": "#/$defs/projectionBinding"
+        },
+        "episodes": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/slug"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/causalEpisode"
+          }
+        },
+        "status": {
+          "enum": [
+            "active",
+            "running",
+            "needs_human",
+            "completed",
+            "cancelled"
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "last_event_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "last_event_hash": {
+          "$ref": "#/$defs/checksum"
+        },
+        "feedback_traversals": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/slug"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/nodeState"
+          }
+        }
+      }
+    },
+    "episodeGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "run_id",
+        "causal_episode_id",
+        "episode_operation_digest",
+        "approver",
+        "evidence_digest",
+        "approved_at"
+      ],
+      "properties": {
+        "decision": {
+          "enum": [
+            "authorize-next-cycle",
+            "approve-independent-episode"
+          ]
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "causal_episode_id": {
+          "$ref": "#/$defs/slug"
+        },
+        "episode_operation_digest": {
+          "$ref": "#/$defs/checksum"
+        },
+        "approver": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_digest": {
+          "$ref": "#/$defs/checksum"
+        },
+        "approved_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "causalEpisode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "episode_key",
+        "classification",
+        "status",
+        "opened_at",
+        "operation_ids",
+        "acceptance_ids",
+        "progress_node_ids",
+        "seen_acceptance_witness_digests",
+        "last_acceptance_digest",
+        "last_progress_event_sequence",
+        "progress_count",
+        "repair_cycles",
+        "no_progress_cycles",
+        "causal_evidence_digest",
+        "last_decision"
+      ],
+      "properties": {
+        "episode_key": {
+          "$ref": "#/$defs/checksum"
+        },
+        "classification": {
+          "enum": [
+            "repair-mutation",
+            "existing-requirement",
+            "current-regression"
+          ]
+        },
+        "status": {
+          "enum": [
+            "active",
+            "needs_human",
+            "closed"
+          ]
+        },
+        "opened_at": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "operation_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:mutation|promotion|invalidation):[a-z0-9]+(?:-[a-z0-9]+)*$"
+          }
+        },
+        "acceptance_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        },
+        "progress_node_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/slug"
+          }
+        },
+        "seen_acceptance_witness_digests": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/checksum"
+          }
+        },
+        "last_acceptance_digest": {
+          "$ref": "#/$defs/checksum"
+        },
+        "last_progress_event_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "progress_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "repair_cycles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "no_progress_cycles": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "causal_evidence_digest": {
+          "$ref": "#/$defs/checksum"
+        },
+        "last_decision": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/episodeGate"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

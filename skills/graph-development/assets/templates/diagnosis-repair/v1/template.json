@@ -1,0 +1,125 @@
+{
+  "approvals": [],
+  "entry_mode": "diagnosis-repair",
+  "entry_nodes": [
+    "reproduce"
+  ],
+  "feedback": [
+    {
+      "exit_condition": "Verification passes or two repair traversals exhaust and escalate to human review.",
+      "from": "regression-verify",
+      "max_traversals": 2,
+      "to": "repair"
+    }
+  ],
+  "id": "diagnosis-repair",
+  "nodes": [
+    {
+      "destructive": false,
+      "id": "reproduce",
+      "output": {
+        "artifact": "artifact:reproduce",
+        "format": "evidence-record"
+      },
+      "predecessors": [],
+      "type": "operation",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "collect-evidence",
+      "output": {
+        "artifact": "artifact:collect-evidence",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "reproduce"
+      ],
+      "type": "observation",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "test-hypotheses",
+      "output": {
+        "artifact": "artifact:test-hypotheses",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "collect-evidence"
+      ],
+      "type": "decision",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "diagnosis-gate",
+      "output": {
+        "artifact": "artifact:diagnosis-gate",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "test-hypotheses"
+      ],
+      "type": "verification",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "repair",
+      "output": {
+        "artifact": "artifact:repair",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "diagnosis-gate"
+      ],
+      "type": "work",
+      "write_scope": [
+        "project"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "regression-verify",
+      "output": {
+        "artifact": "artifact:regression-verify",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "repair"
+      ],
+      "type": "verification",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "finish",
+      "output": {
+        "artifact": "artifact:finish",
+        "format": "evidence-record"
+      },
+      "predecessors": [
+        "regression-verify"
+      ],
+      "type": "work",
+      "write_scope": [
+        "project"
+      ],
+      "writes": true
+    }
+  ],
+  "project_files": [],
+  "schema_version": 1,
+  "specification": null,
+  "terminal_nodes": [
+    "finish"
+  ],
+  "version": 1
+}
