@@ -19,7 +19,7 @@ from context_core import (
     plan_context,
 )
 from context_store import ContextStore
-from graph_core import GraphControlError, RuntimeStateError, StaleStateError, atomic_write_json, load_json, resolve_within
+from graph_core import GraphControlError, RuntimeStateError, atomic_write_json, load_json, resolve_within
 from graphctl import (
     claim_node,
     complete_node,
@@ -35,10 +35,6 @@ from path_contract import (
     project_root_for_graph,
     serialize_relative,
 )
-
-_TERMINATION_GRACE_SECONDS = 2
-_REAP_TIMEOUT_SECONDS = 2
-_FINALIZATION_MARGIN_SECONDS = 30
 
 
 def _graph(path: Path) -> dict[str, Any]:
@@ -111,62 +107,9 @@ def _digest_path(path: Path, project_root: Path) -> dict[str, Any]:
 
 
 def _read_preview(path: Path, limit: int) -> tuple[str, bool, int]:
-    if not path.exists():
-        return "", False, 0
-    with path.open("rb") as handle:
-        payload = handle.read(limit)
-        size = os.fstat(handle.fileno()).st_size
-    return payload.decode("utf-8", errors="replace"), size > limit, size
-
-
-def _finalize_node(
-    graph_path: Path,
-    run_dir: Path,
-    node_id: str,
-    worker_id: str,
-    claimed: dict[str, Any],
-    evidence: dict[str, Any],
-    *,
-    success: bool,
-) -> dict[str, Any]:
-    """Record an already executed result without adopting a replacement claim."""
-    original = claimed["nodes"][node_id]
-    original_lease = original.get("lease")
-    if (
-        original.get("state") != "running"
-        or not isinstance(original_lease, dict)
-        or original_lease.get("owner") != worker_id
-        or not original_lease.get("idempotency_key")
-    ):
-        raise RuntimeStateError("original execution claim has no owned lease")
-    for attempt in range(5):
-        current = load_run(run_dir)
-        state = current["nodes"].get(node_id, {})
-        lease = state.get("lease")
-        if (
-            any(current.get(key) != claimed.get(key) for key in ("run_id", "graph_id", "schema_version"))
-            or run_execution_checksum(current) != run_execution_checksum(claimed)
-            or current.get("projection") != claimed.get("projection")
-            or current.get("outcome_contract") != claimed.get("outcome_contract")
-            or state.get("state") != "running"
-            or state.get("generation") != original["generation"]
-            or state.get("attempts") != original["attempts"]
-            or not isinstance(lease, dict)
-            or lease.get("owner") != original_lease["owner"]
-            or lease.get("idempotency_key") != original_lease["idempotency_key"]
-        ):
-            raise StaleStateError(f"execution claim changed for node {node_id}; result evidence is retained for recovery")
-        try:
-            finalizer = complete_node if success else fail_node
-            return finalizer(graph_path, run_dir, node_id, worker_id, current["run_version"], evidence)
-        except StaleStateError as exc:
-            # CAS fences a change after the identity check; retry only this result.
-            if attempt == 4:
-                raise StaleStateError(
-                    f"could not finalize node {node_id} after 5 concurrent updates; "
-                    "result evidence is retained for recovery without rerunning the command"
-                ) from exc
-    raise AssertionError("unreachable finalization retry state")
+    payload = path.read_bytes() if path.exists() else b""
+    truncated = len(payload) > limit
+    return payload[:limit].decode("utf-8", errors="replace"), truncated, len(payload)
 
 
 def claim_context_node(
@@ -175,8 +118,6 @@ def claim_context_node(
     node_id: str,
     worker_id: str,
     expected_run_version: int,
-    *,
-    include_envelope: bool = False,
 ) -> dict[str, Any]:
     """Claim an opt-in V3 model node and persist its sealed context envelope."""
 
@@ -306,7 +247,7 @@ def claim_context_node(
             f"context planning failed and node is {failed['nodes'][node_id]['state']}: {exc}"
         ) from exc
     lease = claimed["nodes"][node_id]["lease"]
-    result = {
+    return {
         "node_id": node_id,
         "state": "running",
         "run_version": claimed["run_version"],
@@ -317,9 +258,6 @@ def claim_context_node(
         "envelope_record": record.relative_to(run_dir).as_posix(),
         "idempotency_key": lease["idempotency_key"],
     }
-    if include_envelope:
-        result["sealed_envelope"] = envelope
-    return result
 
 
 def execute_node(
@@ -354,37 +292,29 @@ def execute_node(
     if definition["side_effects"]["approval_required"] and not _approval_is_current(before, node_id):
         raise PermissionError(f"node {node_id} requires a current approval")
 
-    timeout_seconds = definition["execution"].get(
-        "timeout_seconds", definition["execution"]["timeout_minutes"] * 60
-    )
-    lease_seconds = max(
-        300,
-        timeout_seconds + _TERMINATION_GRACE_SECONDS + _REAP_TIMEOUT_SECONDS + _FINALIZATION_MARGIN_SECONDS,
-    )
-    claimed = claim_node(graph_path, run_dir, node_id, worker_id, expected_run_version, lease_seconds=lease_seconds)
+    claimed = claim_node(graph_path, run_dir, node_id, worker_id, expected_run_version)
     node_state = claimed["nodes"][node_id]
     attempt = node_state["attempts"]
     project_root = project_root_for_graph(graph_path, graph)
     if not project_root.is_dir():
         result = {"exit_code": None, "timed_out": False, "error": f"project root does not exist: {project_root}"}
-        failed = _finalize_node(graph_path, run_dir, node_id, worker_id, claimed, result, success=False)
+        failed = fail_node(graph_path, run_dir, node_id, worker_id, claimed["run_version"], result)
         return {**result, "state": failed["nodes"][node_id]["state"], "run_version": failed["run_version"]}
 
     working_directory = resolve_within(project_root, definition["execution"].get("working_directory", "."))
     if not working_directory.is_dir():
         result = {"exit_code": None, "timed_out": False, "error": f"working directory does not exist: {working_directory}"}
-        failed = _finalize_node(graph_path, run_dir, node_id, worker_id, claimed, result, success=False)
+        failed = fail_node(graph_path, run_dir, node_id, worker_id, claimed["run_version"], result)
         return {**result, "state": failed["nodes"][node_id]["state"], "run_version": failed["run_version"]}
 
     evidence_dir = run_dir / "evidence" / node_id
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    evidence_name = f"attempt-{attempt}"
-    # Preserve generation-one paths while keeping later executions append-only.
-    if node_state["generation"] != 1:
-        evidence_name = f"generation-{node_state['generation']}-{evidence_name}"
-    stdout_path = evidence_dir / f"{evidence_name}.stdout.txt"
-    stderr_path = evidence_dir / f"{evidence_name}.stderr.txt"
-    result_path = evidence_dir / f"{evidence_name}.json"
+    stdout_path = evidence_dir / f"attempt-{attempt}.stdout.txt"
+    stderr_path = evidence_dir / f"attempt-{attempt}.stderr.txt"
+    result_path = evidence_dir / f"attempt-{attempt}.json"
+    timeout_seconds = definition["execution"].get(
+        "timeout_seconds", definition["execution"]["timeout_minutes"] * 60
+    )
     environment = _minimal_environment(definition["execution"].get("environment", []))
     started = time.monotonic()
     timed_out = False
@@ -406,27 +336,12 @@ def execute_node(
                 exit_code = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                termination_deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+                os.killpg(process.pid, signal.SIGTERM)
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=_TERMINATION_GRACE_SECONDS)
+                    exit_code = process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    pass
-                # A reaped leader does not prove its process group has exited.
-                while (remaining := termination_deadline - time.monotonic()) > 0:
-                    try:
-                        os.killpg(process.pid, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(min(.05, remaining))
-                try:
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                exit_code = process.wait(timeout=_REAP_TIMEOUT_SECONDS)
+                    exit_code = process.wait(timeout=2)
         except OSError as exc:
             spawn_error = str(exc)
     duration = round(time.monotonic() - started, 6)
@@ -455,7 +370,10 @@ def execute_node(
     }
     atomic_write_json(result_path, evidence)
     success = exit_code == 0 and not timed_out and spawn_error is None
-    after = _finalize_node(graph_path, run_dir, node_id, worker_id, claimed, evidence, success=success)
+    if success:
+        after = complete_node(graph_path, run_dir, node_id, worker_id, claimed["run_version"], evidence)
+    else:
+        after = fail_node(graph_path, run_dir, node_id, worker_id, claimed["run_version"], evidence)
     return {
         "node_id": node_id,
         "attempt": attempt,
@@ -486,19 +404,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="claim an opt-in V3 agent/hybrid node and seal its context",
     )
-    parser.add_argument(
-        "--include-envelope",
-        action="store_true",
-        help="include the full sealed envelope and raw context in context-plan JSON output",
-    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.include_envelope and not args.context_plan:
-            raise RuntimeStateError("--include-envelope requires --context-plan")
         if args.context_plan:
             if args.next_node or not args.node:
                 raise RuntimeStateError(
@@ -510,7 +421,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.node,
                 args.worker_id,
                 args.expected_run_version,
-                include_envelope=args.include_envelope,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["state"] == "running" else 1

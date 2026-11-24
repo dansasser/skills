@@ -1244,7 +1244,6 @@ def resume_nodes(
 ) -> dict[str, Any]:
     def resume(graph: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
         resumed: list[str] = []
-        escalated: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
         for resume_id in node_ids:
             if resume_id not in run["nodes"]:
@@ -1268,18 +1267,12 @@ def resume_nodes(
                 maximum = _node_definitions(graph)[resume_id]["execution"]["max_attempts"]
                 if state["attempts"] >= maximum:
                     state["state"] = "needs_human"
-                    escalated.append({
-                        "node_id": resume_id,
-                        "reason": "attempts-exhausted",
-                        "attempts": state["attempts"],
-                        "max_attempts": maximum,
-                    })
-                    continue
+                    raise RuntimeStateError(f"node {resume_id} exhausted {maximum} attempts")
                 state["state"] = "planned"
                 resumed.append(resume_id)
             else:
                 raise RuntimeStateError(f"node {resume_id} in state {current} cannot resume")
-        return {"resumed_nodes": resumed, "escalated_nodes": escalated}
+        return {"resumed_nodes": resumed}
 
     return _mutate(graph_path, run_dir, expected_run_version, actor, "nodes-resumed", resume)
 
