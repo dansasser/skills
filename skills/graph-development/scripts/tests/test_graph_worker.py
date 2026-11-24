@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -27,12 +28,13 @@ from fixtures import (
 from graph_core import RuntimeStateError, atomic_write_json  # noqa: E402
 from graph_core import StaleStateError  # noqa: E402
 import graph_worker  # noqa: E402
+import graphctl  # noqa: E402
 from graph_worker import (  # noqa: E402
     _minimal_environment,
     claim_context_node,
     execute_node,
 )
-from graphctl import approve_node, claim_node, initialize_run, load_run, status_report  # noqa: E402
+from graphctl import approve_node, claim_node, initialize_run, invalidate_nodes, load_run, resume_nodes, status_report  # noqa: E402
 
 
 class GraphWorkerTests(unittest.TestCase):
@@ -74,6 +76,91 @@ class GraphWorkerTests(unittest.TestCase):
                 result["evidence"],
                 "evidence/inspect-context/attempt-1.json",
             )
+
+    def test_new_generation_preserves_previous_result_and_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph = runtime_graph(root)
+            graph["nodes"][0]["execution"]["command"] = [
+                sys.executable, "-c",
+                "from pathlib import Path; import sys; p=Path('executions'); "
+                "n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n)); "
+                "print('stdout-'+str(n)); print('stderr-'+str(n), file=sys.stderr)",
+            ]
+            graph_path, run_dir, run = self._setup(root, graph)
+            first = execute_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"])
+            first_path = run_dir / first["evidence"]
+            first_evidence = json.loads(first_path.read_text())
+            first_files = {
+                path: path.read_bytes()
+                for path in (first_path, run_dir / first_evidence["stdout"]["path"], run_dir / first_evidence["stderr"]["path"])
+            }
+            invalidated = invalidate_nodes(graph_path, run_dir, ["inspect-context"], [], "fixture input changed", first["run_version"])
+            resumed = resume_nodes(graph_path, run_dir, ["inspect-context"], "operator", invalidated["run_version"])
+            self.assertEqual(resumed["nodes"]["inspect-context"]["generation"], 2)
+            second = execute_node(graph_path, run_dir, "inspect-context", "worker", resumed["run_version"])
+            self.assertEqual((first["attempt"], second["attempt"]), (1, 1))
+            self.assertNotEqual(first["evidence"], second["evidence"])
+            for path, original in first_files.items():
+                self.assertEqual(path.read_bytes(), original, f"previous-generation evidence overwritten: {path.name}")
+            second_evidence = json.loads((run_dir / second["evidence"]).read_text())
+            self.assertEqual((run_dir / second_evidence["stdout"]["path"]).read_text(), "stdout-2\n")
+            self.assertEqual((run_dir / second_evidence["stderr"]["path"]).read_text(), "stderr-2\n")
+            self.assertEqual((root / "executions").read_text(), "2")
+
+    def test_claim_lease_covers_command_timeout_and_cleanup(self) -> None:
+        for timeout_field, configured in (("timeout_seconds", 600), ("timeout_minutes", 11)):
+            with self.subTest(timeout_field=timeout_field), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                graph = runtime_graph(root)
+                execution = graph["nodes"][0]["execution"]
+                execution.pop("timeout_seconds", None)
+                execution[timeout_field] = configured
+                timeout = configured if timeout_field == "timeout_seconds" else configured * 60
+                execution["command"] = [
+                    sys.executable, "-c",
+                    "from pathlib import Path; import time; Path('ready').touch();\n"
+                    "while not Path('release').exists(): time.sleep(.01)\n"
+                    "Path('executions').write_text('once')",
+                ]
+                graph_path, run_dir, run = self._setup(root, graph)
+                started = datetime.now(timezone.utc)
+                clock = {"elapsed": 0}
+
+                class Clock(datetime):
+                    @classmethod
+                    def now(cls, tz=None):
+                        return started + timedelta(seconds=clock["elapsed"])
+
+                real_popen = subprocess.Popen
+
+                def spawn(*args, **kwargs):
+                    process = real_popen(*args, **kwargs)
+                    try:
+                        deadline = time.monotonic() + 3
+                        while not (root / "ready").exists() and process.poll() is None and time.monotonic() < deadline:
+                            time.sleep(.01)
+                        self.assertTrue((root / "ready").exists())
+                        claimed = load_run(run_dir)
+                        lease = claimed["nodes"]["inspect-context"]["lease"]
+                        expires = datetime.fromisoformat(lease["expires_at"].replace("Z", "+00:00"))
+                        self.assertGreater((expires - started).total_seconds(), timeout + 4)
+                        clock["elapsed"] = 301
+                        self.assertIsNone(process.poll(), "fixture command ended before attempted recovery")
+                        with self.assertRaisesRegex(RuntimeStateError, "live lease"):
+                            resume_nodes(graph_path, run_dir, ["inspect-context"], "operator", claimed["run_version"])
+                    except BaseException:
+                        process.kill()
+                        process.wait()
+                        raise
+                    finally:
+                        (root / "release").touch()
+                    return process
+
+                with mock.patch.object(graphctl, "datetime", Clock), mock.patch.object(graph_worker.subprocess, "Popen", side_effect=spawn):
+                    result = execute_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"])
+                self.assertEqual(result["state"], "verified")
+                self.assertEqual((root / "executions").read_text(), "once")
 
     def test_minimal_environment_uses_runtime_default_path(self) -> None:
         with (

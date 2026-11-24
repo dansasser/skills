@@ -36,6 +36,10 @@ from path_contract import (
     serialize_relative,
 )
 
+_TERMINATION_GRACE_SECONDS = 2
+_REAP_TIMEOUT_SECONDS = 2
+_FINALIZATION_MARGIN_SECONDS = 30
+
 
 def _graph(path: Path) -> dict[str, Any]:
     graph = load_json(path)
@@ -345,7 +349,14 @@ def execute_node(
     if definition["side_effects"]["approval_required"] and not _approval_is_current(before, node_id):
         raise PermissionError(f"node {node_id} requires a current approval")
 
-    claimed = claim_node(graph_path, run_dir, node_id, worker_id, expected_run_version)
+    timeout_seconds = definition["execution"].get(
+        "timeout_seconds", definition["execution"]["timeout_minutes"] * 60
+    )
+    lease_seconds = max(
+        300,
+        timeout_seconds + _TERMINATION_GRACE_SECONDS + _REAP_TIMEOUT_SECONDS + _FINALIZATION_MARGIN_SECONDS,
+    )
+    claimed = claim_node(graph_path, run_dir, node_id, worker_id, expected_run_version, lease_seconds=lease_seconds)
     node_state = claimed["nodes"][node_id]
     attempt = node_state["attempts"]
     project_root = project_root_for_graph(graph_path, graph)
@@ -362,12 +373,13 @@ def execute_node(
 
     evidence_dir = run_dir / "evidence" / node_id
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = evidence_dir / f"attempt-{attempt}.stdout.txt"
-    stderr_path = evidence_dir / f"attempt-{attempt}.stderr.txt"
-    result_path = evidence_dir / f"attempt-{attempt}.json"
-    timeout_seconds = definition["execution"].get(
-        "timeout_seconds", definition["execution"]["timeout_minutes"] * 60
-    )
+    evidence_name = f"attempt-{attempt}"
+    # Preserve generation-one paths while keeping later executions append-only.
+    if node_state["generation"] != 1:
+        evidence_name = f"generation-{node_state['generation']}-{evidence_name}"
+    stdout_path = evidence_dir / f"{evidence_name}.stdout.txt"
+    stderr_path = evidence_dir / f"{evidence_name}.stderr.txt"
+    result_path = evidence_dir / f"{evidence_name}.json"
     environment = _minimal_environment(definition["execution"].get("environment", []))
     started = time.monotonic()
     timed_out = False
@@ -389,13 +401,13 @@ def execute_node(
                 exit_code = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                termination_deadline = time.monotonic() + 2
+                termination_deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
                 try:
-                    process.wait(timeout=2)
+                    process.wait(timeout=_TERMINATION_GRACE_SECONDS)
                 except subprocess.TimeoutExpired:
                     pass
                 # A reaped leader does not prove its process group has exited.
@@ -409,7 +421,7 @@ def execute_node(
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                exit_code = process.wait(timeout=2)
+                exit_code = process.wait(timeout=_REAP_TIMEOUT_SECONDS)
         except OSError as exc:
             spawn_error = str(exc)
     duration = round(time.monotonic() - started, 6)

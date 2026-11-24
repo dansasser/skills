@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -618,6 +619,96 @@ class GraphControlTests(unittest.TestCase):
             atomic_write_json(run_dir / "run.json", run)
             run = resume_nodes(graph_path, run_dir, ["inspect-context"], "operator", run["run_version"])
             self.assertEqual(run["nodes"]["inspect-context"]["state"], "ready")
+
+    def _claimed_resume_case(self, root: Path, schema_version: int, *, peer: bool = False) -> tuple:
+        graph = runtime_graph(root)
+        graph["nodes"][0]["execution"]["max_attempts"] = 1
+        if peer:
+            graph["nodes"].append(backlog_node("peer-context"))
+            graph["entry_nodes"].append("peer-context")
+            graph["terminal_nodes"].append("peer-context")
+        graph_path = self._write_graph(root, graph)
+        run_dir = root / ".development-graph"
+        inputs = {}
+        if schema_version == 2:
+            inputs = {"outcome_contract": outcome_contract(graph), "projection": outcome_projection(graph)}
+        run = initialize_run(graph_path, run_dir, actor="test", **inputs)
+        claimed_at = datetime.now(timezone.utc)
+        with mock.patch.object(graphctl, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = claimed_at
+            run = claim_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"], 1)
+            if peer:
+                run = claim_node(graph_path, run_dir, "peer-context", "peer-worker", run["run_version"], 60)
+        return graph_path, run_dir, run, claimed_at
+
+    def test_expired_final_lease_commits_human_escalation(self) -> None:
+        for schema_version in (1, 2):
+            with self.subTest(schema_version=schema_version), tempfile.TemporaryDirectory() as directory:
+                graph_path, run_dir, claimed, claimed_at = self._claimed_resume_case(Path(directory), schema_version)
+                with mock.patch.object(graphctl, "datetime", wraps=datetime) as clock:
+                    clock.now.return_value = claimed_at + timedelta(seconds=2)
+                    run = resume_nodes(graph_path, run_dir, ["inspect-context"], "operator", claimed["run_version"])
+                state = run["nodes"]["inspect-context"]
+                self.assertEqual(state["state"], "needs_human")
+                self.assertIsNone(state["lease"])
+                self.assertEqual(state["attempts"], 1)
+                self.assertEqual(run["run_version"], claimed["run_version"] + 1)
+                self.assertEqual(load_run(run_dir), run)
+                event = json.loads((run_dir / "events.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(event["action"], "nodes-resumed")
+                self.assertEqual(event["details"]["resumed_nodes"], [])
+                self.assertEqual(event["details"]["escalated_nodes"], [{
+                    "node_id": "inspect-context", "reason": "attempts-exhausted",
+                    "attempts": 1, "max_attempts": 1,
+                }])
+                self.assertEqual(verify_runtime_integrity(graph_path, run_dir), [])
+                with self.assertRaises(RuntimeStateError):
+                    claim_node(graph_path, run_dir, "inspect-context", "replacement", run["run_version"], 60)
+                with self.assertRaises(RuntimeStateError):
+                    resume_nodes(graph_path, run_dir, ["inspect-context"], "operator", run["run_version"])
+                self.assertEqual(load_run(run_dir), run)
+
+    def test_resume_exhaustion_preserves_batch_atomicity_for_invalid_or_live_nodes(self) -> None:
+        for schema_version in (1, 2):
+            for invalid in ("unknown-node", "peer-context"):
+                with self.subTest(schema_version=schema_version, invalid=invalid), tempfile.TemporaryDirectory() as directory:
+                    graph_path, run_dir, claimed, claimed_at = self._claimed_resume_case(Path(directory), schema_version, peer=True)
+                    before = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+                    with mock.patch.object(graphctl, "datetime", wraps=datetime) as clock:
+                        clock.now.return_value = claimed_at + timedelta(seconds=2)
+                        with self.assertRaisesRegex(RuntimeStateError, "unknown node" if invalid == "unknown-node" else "live lease"):
+                            resume_nodes(graph_path, run_dir, ["inspect-context", invalid], "operator", claimed["run_version"])
+                    after = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+                    self.assertEqual(after, before)
+                    self.assertEqual(load_run(run_dir), claimed)
+                    self.assertEqual(verify_runtime_integrity(graph_path, run_dir), [])
+
+    def test_resume_commits_exhaustion_and_retryable_node_together(self) -> None:
+        for schema_version in (1, 2):
+            with self.subTest(schema_version=schema_version), tempfile.TemporaryDirectory() as directory:
+                graph_path, run_dir, claimed, claimed_at = self._claimed_resume_case(Path(directory), schema_version, peer=True)
+                failed = fail_node(graph_path, run_dir, "peer-context", "peer-worker", claimed["run_version"], {"ok": False})
+                with mock.patch.object(graphctl, "datetime", wraps=datetime) as clock:
+                    clock.now.return_value = claimed_at + timedelta(seconds=2)
+                    run = resume_nodes(graph_path, run_dir, ["inspect-context", "peer-context"], "operator", failed["run_version"])
+                self.assertEqual(run["nodes"]["inspect-context"]["state"], "needs_human")
+                self.assertEqual(run["nodes"]["peer-context"]["state"], "ready")
+                self.assertIsNone(run["nodes"]["inspect-context"]["lease"])
+                self.assertEqual(run["run_version"], failed["run_version"] + 1)
+                event = json.loads((run_dir / "events.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(event["details"]["resumed_nodes"], ["peer-context"])
+                self.assertEqual(verify_runtime_integrity(graph_path, run_dir), [])
+
+    def test_failed_final_attempt_remains_a_non_resumable_human_gate(self) -> None:
+        for schema_version in (1, 2):
+            with self.subTest(schema_version=schema_version), tempfile.TemporaryDirectory() as directory:
+                graph_path, run_dir, claimed, _ = self._claimed_resume_case(Path(directory), schema_version)
+                failed = fail_node(graph_path, run_dir, "inspect-context", "worker", claimed["run_version"], {"ok": False})
+                self.assertEqual(failed["nodes"]["inspect-context"]["state"], "needs_human")
+                with self.assertRaises(RuntimeStateError):
+                    resume_nodes(graph_path, run_dir, ["inspect-context"], "operator", failed["run_version"])
+                self.assertEqual(load_run(run_dir), failed)
+                self.assertEqual(verify_runtime_integrity(graph_path, run_dir), [])
 
 
     def test_v2_init_requires_paired_valid_inputs_before_artifacts(self) -> None:
