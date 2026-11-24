@@ -2,13 +2,6 @@
 
 Skill versions are recorded separately using `<skill-name>-v<version>` tags. Each tag points to the collection revision containing that skill release.
 
-## Unreleased — Graph Development 4.1.0
-
-- Add Graph Development as an independently usable skill under `skills/graph-development`, with Apache-2.0 licensing, explicit invocation and bounded project opt-in.
-- Preserve the current outcome/projection runtime and optional implementation-plan workflow: direct specification consumption, named unresolved decisions and scoped consumers, preview-first lifecycle transactions, validation, recovery and provider-neutral context controls.
-- Curate the complete folder for public use, excluding private operating policy, development records and private Git history. Keep runtime helpers, portable templates/references, synthetic examples and verification support together.
-- Follow the collection installation and documentation conventions. Add architecture/configuration/operations guides, a complete schema-v2 example and a dedicated Python 3.12 CI job.
-
 ## mesh-painting-v0.2.0 — 2026-11-23
 
 - Preserve `legacy-seven` as the default and add opt-in `adaptive-v1` painting with image/region-dependent work, versioned finish/configuration settings, deterministic decisions and distinct quality, diminishing-return and budget outcomes.
