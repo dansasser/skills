@@ -19,6 +19,42 @@ from context_store import ContextStore  # noqa: E402
 
 
 class ContextControlCliTests(unittest.TestCase):
+    def test_overbudget_projection_persists_denial_without_approved_envelope(self) -> None:
+        self.test_plan_writes_explicit_envelope_and_digest_first_store()
+        envelope = json.loads(self.envelope_path.read_text())
+        envelope["request_policy"]["max_additional_tokens"] = 2
+        envelope = seal_document(envelope)
+        self.envelope_path.write_text(json.dumps(envelope))
+        request = seal_document({
+            "schema_version": 1, "request_id": "request-overbudget",
+            "envelope_id": envelope["envelope_id"], "task_node_id": envelope["task_node_id"],
+            "kind": "artifact", "purpose": "Satisfy acceptance.",
+            "max_tokens": 2, "requested_artifacts": ["artifact:missing"],
+        })
+        (self.root / "request.json").write_text(json.dumps(request))
+        config = {
+            "artifact_registry": {"artifact:missing": {
+                "projection": {"content": "bounded projection", "source": "artifacts/missing.json", "requirements": ["acceptance"]},
+                "authorized": True, "fresh": True, "provenance_complete": True, "reachable": True,
+            }},
+            "read_scope": ["artifact:missing"], "max_requests": 1,
+        }
+        (self.root / "broker.json").write_text(json.dumps(config))
+        result = subprocess.run(self.command + [
+            "resolve-request", "--project-root", str(self.root),
+            "--envelope", "envelope.json", "--request", "request.json",
+            "--broker-config", "broker.json", "--run-dir", ".development-graph",
+            "--tokenizer", "deterministic-word-v1", "--envelope-output", "resumed.json",
+        ], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["decision"], "denied")
+        self.assertIsNone(report["new_envelope_digest"])
+        self.assertFalse((self.root / "resumed.json").exists())
+        decisions = list((self.root / ".development-graph/context/requests").glob("*-decision-*.json"))
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(json.loads(decisions[0].read_text())["decision"], "denied")
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

@@ -52,6 +52,59 @@ from validate_graph import canonical_checksum  # noqa: E402
 
 
 class GraphControlTests(unittest.TestCase):
+    def test_claim_excludes_conflicting_nodes_until_recovered_or_completed(self) -> None:
+        for projected in (False, True):
+            for reverse in (False, True):
+                with self.subTest(projected=projected, reverse=reverse), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    graph = runtime_graph(root)
+                    parallel = copy.deepcopy(graph["nodes"][1])
+                    parallel["id"] = "parallel-work"
+                    parallel["outputs"][0]["artifact"] = "artifact:parallel"
+                    graph["nodes"].append(parallel)
+                    dependency = copy.deepcopy(graph["edges"][0])
+                    dependency.update(id="context-to-parallel", to="parallel-work")
+                    graph["edges"].append(dependency)
+                    independent = copy.deepcopy(parallel)
+                    independent["id"] = "independent-work"
+                    independent["outputs"][0]["artifact"] = "artifact:independent"
+                    independent["permissions"]["write"] = ["other/"]
+                    independent["resources"] = ["other/"]
+                    graph["nodes"].append(independent)
+                    dependency = copy.deepcopy(dependency)
+                    dependency.update(id="context-to-independent", to="independent-work")
+                    graph["edges"].append(dependency)
+                    first, second = ("parallel-work", "implement-change") if reverse else ("implement-change", "parallel-work")
+                    graph["edges"].append({
+                        "id": "exclusive-workspace", "from": "implement-change",
+                        "to": "parallel-work", "type": "conflicts",
+                        "condition": "Exclusive workspace", "artifacts": [],
+                        "max_traversals": None, "exit_condition": None,
+                    })
+                    graph_path = self._write_graph(root, graph)
+                    run_dir = root / ".development-graph"
+                    options = {"outcome_contract": outcome_contract(graph), "projection": outcome_projection(graph)} if projected else {}
+                    run = initialize_run(graph_path, run_dir, "test", **options)
+                    run = claim_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"])
+                    run = complete_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"], {"status": "verified"})
+                    run = claim_node(graph_path, run_dir, first, "worker-a", run["run_version"])
+                    run = claim_node(graph_path, run_dir, "independent-work", "worker-c", run["run_version"])
+                    self.assertEqual(run["nodes"][first]["state"], "running")
+                    self.assertEqual(run["nodes"]["independent-work"]["state"], "running")
+                    before = (run_dir / "run.json").read_bytes(), (run_dir / "events.jsonl").read_bytes()
+                    with self.assertRaisesRegex(RuntimeStateError, "conflict"):
+                        claim_node(graph_path, run_dir, second, "worker-b", run["run_version"])
+                    self.assertEqual(before, ((run_dir / "run.json").read_bytes(), (run_dir / "events.jsonl").read_bytes()))
+                    # An expired lease still requires explicit recovery; it does not fence its worker.
+                    with mock.patch("graphctl.datetime") as clock:
+                        clock.now.return_value = datetime.now(timezone.utc) + timedelta(days=1)
+                        with self.assertRaisesRegex(RuntimeStateError, "conflict"):
+                            claim_node(graph_path, run_dir, second, "worker-b", run["run_version"])
+                    run = complete_node(graph_path, run_dir, first, "worker-a", run["run_version"], {"status": "verified"})
+                    run = claim_node(graph_path, run_dir, second, "worker-b", run["run_version"])
+                    self.assertEqual(run["nodes"][second]["state"], "running")
+                    self.assertEqual(verify_runtime_integrity(graph_path, run_dir), [])
+
     def _write_graph(self, root: Path, graph: dict) -> Path:
         path = root / "development-graph.json"
         atomic_write_json(path, graph)

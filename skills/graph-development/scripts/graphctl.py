@@ -914,6 +914,12 @@ def claim_node(
         state = run["nodes"][node_id]
         if state["state"] != "ready":
             raise RuntimeStateError(f"node {node_id} is {state['state']}, not ready")
+        for edge in graph["edges"]:
+            if edge["type"] != "conflicts" or node_id not in {edge["from"], edge["to"]}:
+                continue
+            other_id = edge["to"] if edge["from"] == node_id else edge["from"]
+            if run["nodes"][other_id]["state"] in {"running", "verifying"}:
+                raise RuntimeStateError(f"node {node_id} conflicts with active node {other_id}")
         definition = definitions[node_id]
         if definition["side_effects"]["approval_required"] and not _approval_is_current(state, run, node_id):
             raise PermissionError(f"node {node_id} requires a current approval")

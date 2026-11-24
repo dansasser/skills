@@ -31,6 +31,43 @@ def context_item(artifact_id: str, content: str) -> dict[str, object]:
 
 
 class ContextBrokerTests(unittest.TestCase):
+    def test_artifact_approval_accounts_for_headers_and_adapter_framing(self) -> None:
+        class FramedTokenizer(DeterministicWordTokenizer):
+            def serialize_prompt(self, payload: str) -> str:
+                return "frame " * payload.count("[artifact:") + payload
+
+        registry = {"artifact:missing": {
+            "projection": {"content": "bounded projection", "source": "artifacts/missing.json", "requirements": ["acceptance"]},
+            "authorized": True, "fresh": True, "provenance_complete": True, "reachable": True,
+        }}
+        for tokenizer, cost in [(DeterministicWordTokenizer("broker-word-v1"), 3), (FramedTokenizer("broker-word-v1"), 4)]:
+            for limit in (cost - 1, cost):
+                for bound in ("request", "policy", "remaining"):
+                    with self.subTest(framed=cost == 4, limit=limit, bound=bound):
+                        self.envelope = plan_context(
+                            valid_graph(), "implement-change",
+                            [context_item("artifact:required", "required information")], [], {},
+                            tokenizer=tokenizer, mode="executable", input_limit=100,
+                            output_reserve=20, safety_margin=5,
+                            request_policy={"allowed_kinds": ["artifact"], "allowed_capabilities": [], "max_additional_tokens": limit if bound == "policy" else 10},
+                        )["envelope"]
+                        if bound == "remaining":
+                            budget = self.envelope["budget"]
+                            budget["available_context"] = budget["used_context"] + limit
+                            budget["input_limit"] = budget["available_context"] + budget["output_reserve"] + budget["safety_margin"]
+                            self.envelope = seal_document(self.envelope)
+                        broker = ContextBroker(artifact_registry=registry, capability_registry={}, tokenizer=tokenizer, read_scope={"artifact:missing"}, external_scope=set(), max_requests=1)
+                        decision = broker.resolve(self.envelope, self.request(max_tokens=limit))
+                        if limit < cost:
+                            self.assertEqual(decision["decision"], "denied")
+                            self.assertNotIn("projection_items", decision)
+                        else:
+                            self.assertEqual(decision["decision"], "approved")
+                            extended = extend_envelope(self.envelope, decision["projection_items"], tokenizer=tokenizer, parent_request_digest=decision["request_digest"])
+                            self.assertEqual(validate_envelope(extended), [])
+                            self.assertEqual(decision["projected_tokens"], cost)
+                            self.assertEqual(extended["budget"]["used_context"] - self.envelope["budget"]["used_context"], cost)
+
     def setUp(self) -> None:
         graph = valid_graph()
         graph["project"]["context_version"] = "test:broker"

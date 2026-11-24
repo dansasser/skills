@@ -7,8 +7,10 @@ import hashlib
 from typing import Any
 
 from context_core import (
+    ContextControlError,
     Tokenizer,
     canonical_json_bytes,
+    extend_envelope,
     seal_document,
     validate_envelope,
     validate_request,
@@ -250,8 +252,20 @@ class ContextBroker:
                     "version": record.get("version", "unversioned"),
                 }
             )
-        projected_tokens = self._tokenizer.count_tokens(
-            "\n\n".join(item["content"] for item in projections)
+        # Use the same complete serialization and budget checks as handoff,
+        # before the caller can persist or consume an approved decision.
+        try:
+            extended = extend_envelope(
+                envelope,
+                projections,
+                tokenizer=self._tokenizer,
+                parent_request_digest=request["digest"],
+            )
+        except ContextControlError as exc:
+            return self._record(envelope, request, "denied", reason=str(exc))
+        projected_tokens = max(
+            0,
+            extended["budget"]["used_context"] - envelope["budget"]["used_context"],
         )
         if projected_tokens > request["max_tokens"]:
             return self._record(
