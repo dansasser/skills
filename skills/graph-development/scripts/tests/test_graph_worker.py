@@ -184,7 +184,7 @@ class GraphWorkerTests(unittest.TestCase):
             self.assertTrue(result["timed_out"])
             self.assertEqual(result["state"], "failed")
 
-    def _timeout_with_descendant(self, *, cleanup_delay: float | None = None) -> None:
+    def _timeout_with_descendant(self, *, cleanup_delay: float | None = None, normal_exit: bool = False) -> None:
         import ctypes
 
         libc = ctypes.CDLL(None, use_errno=True)
@@ -216,10 +216,10 @@ class GraphWorkerTests(unittest.TestCase):
                     "import subprocess,sys,time; from pathlib import Path; "
                     f"subprocess.Popen([sys.executable, '-c', {child_code!r}]);\n"
                     "while not Path('child.pid').exists(): time.sleep(.01)\n"
-                    "time.sleep(30)"
+                    + ("" if normal_exit else "time.sleep(30)")
                 )
                 graph["nodes"][0]["execution"].update(
-                    command=[sys.executable, "-c", parent_code], timeout_seconds=1
+                    command=[sys.executable, "-c", parent_code], timeout_seconds=5 if normal_exit else 1
                 )
                 graph_path, run_dir, run = self._setup(root, graph)
                 try:
@@ -235,9 +235,10 @@ class GraphWorkerTests(unittest.TestCase):
                         if child_exited:
                             break
                         time.sleep(.01)
-                    self.assertTrue(result["timed_out"])
-                    self.assertEqual(result["state"], "failed")
-                    self.assertTrue(child_exited, "timed-out descendant survived its parent")
+                    self.assertEqual(result["timed_out"], not normal_exit)
+                    self.assertEqual(result["state"], "verified" if normal_exit else "failed")
+                    self.assertTrue(child_exited, "descendant survived lease release")
+                    self.assertIsNone(load_run(run_dir)["nodes"]["inspect-context"]["lease"])
                     if cleanup_delay is not None:
                         self.assertTrue((root / "cleanup-complete").exists(), "descendant lost its TERM cleanup grace")
                 finally:
@@ -262,6 +263,14 @@ class GraphWorkerTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux child reaping")
     def test_timeout_preserves_descendant_term_cleanup_grace(self) -> None:
         self._timeout_with_descendant(cleanup_delay=.2)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux child reaping")
+    def test_normal_exit_cleans_up_descendant_before_lease_release(self) -> None:
+        self._timeout_with_descendant(normal_exit=True)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux child reaping")
+    def test_normal_exit_preserves_descendant_term_cleanup_grace(self) -> None:
+        self._timeout_with_descendant(normal_exit=True, cleanup_delay=.2)
 
     def _execute_with_unrelated_approval(self, exit_code: int, *, race_finalization: bool = False) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -535,8 +544,11 @@ class GraphWorkerTests(unittest.TestCase):
             status = status_report(graph_path, run_dir)
             self.assertEqual(status["state_counts"]["running"], 1)
 
-    def _context_plan_fixture(self, root: Path, *, input_limit: int = 1000) -> tuple:
+    def _context_plan_fixture(self, root: Path, *, input_limit: int = 1000, projected: bool = True, unrelated: bool = False) -> tuple:
         graph = runtime_graph(root)
+        if unrelated:
+            graph["nodes"].append(backlog_node("unrelated-work"))
+            graph["entry_nodes"].append("unrelated-work")
         target = next(node for node in graph["nodes"] if node["id"] == "implement-change")
         target["executor"]["kind"] = "agent"
         for field in ("command", "working_directory", "environment", "evidence_paths", "capture_limit_bytes", "timeout_seconds"):
@@ -556,7 +568,8 @@ class GraphWorkerTests(unittest.TestCase):
         plan_path = root / "context/claim-plan.json"
         plan_path.parent.mkdir()
         atomic_write_json(plan_path, plan)
-        graph_path, run_dir, run = self._setup_v2(root, graph)
+        setup = self._setup_v2 if projected else self._setup
+        graph_path, run_dir, run = setup(root, graph)
         inspected = execute_node(graph_path, run_dir, "inspect-context", "context-worker", run["run_version"])
         return graph_path, run_dir, inspected
 
@@ -649,6 +662,59 @@ class GraphWorkerTests(unittest.TestCase):
                         self.assertNotIn("sealed_envelope", planned)
                         self.assertNotIn("PRIVATE RUNTIME CONTEXT", json.dumps(planned))
                     self._assert_digest_only_run(run_dir)
+
+    def test_context_failure_finalizes_after_unrelated_run_updates(self) -> None:
+        for projected in (False, True):
+            for overflow in (False, True):
+                with self.subTest(projected=projected, overflow=overflow), tempfile.TemporaryDirectory() as directory:
+                    graph_path, run_dir, inspected = self._context_plan_fixture(Path(directory), input_limit=1 if overflow else 1000, projected=projected, unrelated=True)
+                    real_plan = graph_worker.plan_context
+
+                    def plan(*args, **kwargs):
+                        current = load_run(run_dir)
+                        current = claim_node(graph_path, run_dir, "unrelated-work", "other-worker", current["run_version"])
+                        graphctl.complete_node(graph_path, run_dir, "unrelated-work", "other-worker", current["run_version"], {"status": "verified"})
+                        if overflow:
+                            return real_plan(*args, **kwargs)
+                        raise RuntimeStateError("fixture planning failure")
+
+                    with mock.patch.object(graph_worker, "plan_context", side_effect=plan) as planner:
+                        if overflow:
+                            result = claim_context_node(graph_path, run_dir, "implement-change", "context-worker", inspected["run_version"])
+                            self.assertEqual(result["status"], "mandatory_overflow")
+                        else:
+                            with self.assertRaisesRegex(RuntimeStateError, "context planning failed"):
+                                claim_context_node(graph_path, run_dir, "implement-change", "context-worker", inspected["run_version"])
+                    self.assertEqual(planner.call_count, 1)
+                    state = load_run(run_dir)["nodes"]["implement-change"]
+                    self.assertEqual(state["state"], "failed")
+                    self.assertIsNone(state["lease"])
+                    self.assertEqual(state["last_result"]["status"], "mandatory_overflow" if overflow else "context_planning_failed")
+                    self.assertEqual(graphctl.verify_runtime_integrity(graph_path, run_dir), [])
+                    self._assert_digest_only_run(run_dir)
+
+    def test_context_failure_rejects_a_replacement_claim(self) -> None:
+        for overflow in (False, True):
+            with self.subTest(overflow=overflow), tempfile.TemporaryDirectory() as directory:
+                graph_path, run_dir, inspected = self._context_plan_fixture(Path(directory), input_limit=1 if overflow else 1000)
+                real_plan = graph_worker.plan_context
+
+                def plan(*args, **kwargs):
+                    current = load_run(run_dir)
+                    current = graphctl.fail_node(graph_path, run_dir, "implement-change", "context-worker", current["run_version"], {"status": "failed"})
+                    current = resume_nodes(graph_path, run_dir, ["implement-change"], "operator", current["run_version"])
+                    claim_node(graph_path, run_dir, "implement-change", "replacement-worker", current["run_version"])
+                    if overflow:
+                        return real_plan(*args, **kwargs)
+                    raise RuntimeStateError("fixture planning failure")
+
+                with mock.patch.object(graph_worker, "plan_context", side_effect=plan):
+                    with self.assertRaises(StaleStateError):
+                        claim_context_node(graph_path, run_dir, "implement-change", "context-worker", inspected["run_version"])
+                state = load_run(run_dir)["nodes"]["implement-change"]
+                self.assertEqual(state["state"], "running")
+                self.assertEqual(state["lease"]["owner"], "replacement-worker")
+                self.assertEqual(graphctl.verify_runtime_integrity(graph_path, run_dir), [])
 
 
     def test_evidence_collection_errors_fail_once_and_preserve_result(self) -> None:

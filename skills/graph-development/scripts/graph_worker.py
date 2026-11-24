@@ -119,6 +119,30 @@ def _read_preview(path: Path, limit: int) -> tuple[str, bool, int]:
     return payload.decode("utf-8", errors="replace"), size > limit, size
 
 
+def _terminate_process_group(process: subprocess.Popen) -> None:
+    """Stop remaining group work even when its leader has already exited."""
+    termination_deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    # A reaped leader does not prove its process group has exited.
+    while (remaining := termination_deadline - time.monotonic()) > 0:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(min(.05, remaining))
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def _finalize_node(
     graph_path: Path,
     run_dir: Path,
@@ -265,46 +289,46 @@ def claim_context_node(
         store = ContextStore(run_dir)
         if planned["status"] == "mandatory_overflow":
             store.store_result(planned["result"])
-            failed = fail_node(
-                graph_path,
-                run_dir,
-                node_id,
-                worker_id,
-                claimed["run_version"],
-                {
-                    "status": "mandatory_overflow",
-                    "result_digest": planned["result"]["digest"],
-                    "mandatory_tokens": planned["mandatory_tokens"],
-                    "available_context": planned["available_context"],
-                },
+        else:
+            envelope = planned["envelope"]
+            record = store.store_envelope(
+                envelope,
+                retain_payload=binding["retention"] == "explicit-payload",
             )
-            return {
-                "node_id": node_id,
-                "state": failed["nodes"][node_id]["state"],
-                "run_version": failed["run_version"],
-                "status": "mandatory_overflow",
-                "result_digest": planned["result"]["digest"],
-            }
-        envelope = planned["envelope"]
-        record = store.store_envelope(
-            envelope,
-            retain_payload=binding["retention"] == "explicit-payload",
-        )
     except Exception as exc:
-        failed = fail_node(
+        failed = _finalize_node(
             graph_path,
             run_dir,
             node_id,
             worker_id,
-            claimed["run_version"],
+            claimed,
             {
                 "status": "context_planning_failed",
                 "error": f"{type(exc).__name__}: {exc}",
             },
+            success=False,
         )
         raise RuntimeStateError(
             f"context planning failed and node is {failed['nodes'][node_id]['state']}: {exc}"
         ) from exc
+    if planned["status"] == "mandatory_overflow":
+        failed = _finalize_node(
+            graph_path, run_dir, node_id, worker_id, claimed,
+            {
+                "status": "mandatory_overflow",
+                "result_digest": planned["result"]["digest"],
+                "mandatory_tokens": planned["mandatory_tokens"],
+                "available_context": planned["available_context"],
+            },
+            success=False,
+        )
+        return {
+            "node_id": node_id,
+            "state": failed["nodes"][node_id]["state"],
+            "run_version": failed["run_version"],
+            "status": "mandatory_overflow",
+            "result_digest": planned["result"]["digest"],
+        }
     lease = claimed["nodes"][node_id]["lease"]
     result = {
         "node_id": node_id,
@@ -406,27 +430,9 @@ def execute_node(
                 exit_code = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                termination_deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=_TERMINATION_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    pass
-                # A reaped leader does not prove its process group has exited.
-                while (remaining := termination_deadline - time.monotonic()) > 0:
-                    try:
-                        os.killpg(process.pid, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(min(.05, remaining))
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                exit_code = process.wait(timeout=_REAP_TIMEOUT_SECONDS)
+            finally:
+                _terminate_process_group(process)
+            exit_code = process.wait(timeout=_REAP_TIMEOUT_SECONDS)
         except OSError as exc:
             spawn_error = str(exc)
     duration = round(time.monotonic() - started, 6)
