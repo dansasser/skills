@@ -1,0 +1,370 @@
+{
+  "approvals": [
+    {
+      "artifact": "artifact:specification-approval",
+      "from": "approve-specification",
+      "to": "author-implementation-plan"
+    },
+    {
+      "artifact": "artifact:specification-approval",
+      "from": "approve-specification",
+      "to": "implement"
+    }
+  ],
+  "entry_mode": "specification-to-delivery",
+  "entry_nodes": [
+    "capture-project-context"
+  ],
+  "feedback": [
+    {
+      "exit_condition": "Verification passes or two repair traversals exhaust and escalate to human review.",
+      "from": "verify-specification-set",
+      "max_traversals": 2,
+      "to": "inventory-open-decisions"
+    },
+    {
+      "exit_condition": "Verification passes or two repair traversals exhaust and escalate to human review.",
+      "from": "verify-delivery",
+      "max_traversals": 2,
+      "to": "implement"
+    }
+  ],
+  "id": "specification-to-delivery",
+  "nodes": [
+    {
+      "destructive": false,
+      "id": "capture-project-context",
+      "output": {
+        "artifact": "artifact:project-context",
+        "format": "evidence-record"
+      },
+      "predecessors": [],
+      "type": "operation",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "define-product-and-scope",
+      "output": {
+        "artifact": "doc/product-spec.md",
+        "format": "text/markdown"
+      },
+      "predecessors": [
+        "capture-project-context"
+      ],
+      "type": "work",
+      "write_scope": [
+        "doc/product-spec.md"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "define-constraints-and-risks",
+      "output": {
+        "artifact": "doc/constraints-and-risks.md",
+        "format": "text/markdown"
+      },
+      "predecessors": [
+        "capture-project-context"
+      ],
+      "type": "work",
+      "write_scope": [
+        "doc/constraints-and-risks.md"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "define-architecture-and-interfaces",
+      "output": {
+        "artifact": "doc/architecture-spec.md",
+        "format": "text/markdown"
+      },
+      "predecessors": [
+        "define-product-and-scope",
+        "define-constraints-and-risks"
+      ],
+      "type": "work",
+      "write_scope": [
+        "doc/architecture-spec.md"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "define-acceptance-contract",
+      "output": {
+        "artifact": "doc/acceptance-spec.md",
+        "format": "text/markdown"
+      },
+      "predecessors": [
+        "define-product-and-scope",
+        "define-constraints-and-risks"
+      ],
+      "type": "work",
+      "write_scope": [
+        "doc/acceptance-spec.md"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "inventory-open-decisions",
+      "output": {
+        "artifact": "doc/open-questions.md",
+        "format": "text/markdown"
+      },
+      "predecessors": [
+        "define-architecture-and-interfaces",
+        "define-acceptance-contract"
+      ],
+      "type": "work",
+      "write_scope": [
+        "doc/open-questions.md"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "resolve-blocking-decisions",
+      "output": {
+        "artifact": "artifact:blocking-decision-set",
+        "format": "decision-record"
+      },
+      "predecessors": [
+        "inventory-open-decisions"
+      ],
+      "type": "decision",
+      "write_scope": [
+        "doc/decisions"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "verify-specification-set",
+      "output": {
+        "artifact": "artifact:specification-verification",
+        "format": "validation-report"
+      },
+      "predecessors": [
+        "define-product-and-scope",
+        "define-constraints-and-risks",
+        "define-architecture-and-interfaces",
+        "define-acceptance-contract",
+        "inventory-open-decisions",
+        "resolve-blocking-decisions"
+      ],
+      "type": "verification",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "approve-specification",
+      "output": {
+        "artifact": "artifact:specification-approval",
+        "format": "approval-record"
+      },
+      "predecessors": [
+        "verify-specification-set"
+      ],
+      "type": "human_gate",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "author-implementation-plan",
+      "output": {
+        "artifact": "doc/implementation-plan.md",
+        "format": "text/markdown"
+      },
+      "predecessors": [
+        "define-product-and-scope",
+        "define-constraints-and-risks",
+        "define-architecture-and-interfaces",
+        "define-acceptance-contract",
+        "inventory-open-decisions",
+        "resolve-blocking-decisions",
+        "approve-specification"
+      ],
+      "type": "work",
+      "write_scope": [
+        "doc/implementation-plan.md"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "implement",
+      "output": {
+        "artifact": "artifact:implementation",
+        "format": "project-change"
+      },
+      "predecessors": [
+        "author-implementation-plan",
+        "approve-specification"
+      ],
+      "type": "work",
+      "write_scope": [
+        "project implementation"
+      ],
+      "writes": true
+    },
+    {
+      "destructive": false,
+      "id": "verify-delivery",
+      "output": {
+        "artifact": "artifact:delivery-verification",
+        "format": "validation-report"
+      },
+      "predecessors": [
+        "implement"
+      ],
+      "type": "verification",
+      "write_scope": [],
+      "writes": false
+    },
+    {
+      "destructive": false,
+      "id": "finish",
+      "output": {
+        "artifact": "artifact:delivery-record",
+        "format": "handoff-record"
+      },
+      "predecessors": [
+        "verify-delivery"
+      ],
+      "type": "work",
+      "write_scope": [
+        "reports/delivery-record.md"
+      ],
+      "writes": true
+    }
+  ],
+  "project_files": [
+    {
+      "path": "doc/product-spec.md",
+      "source": "project-files/doc/product-spec.md"
+    },
+    {
+      "path": "doc/constraints-and-risks.md",
+      "source": "project-files/doc/constraints-and-risks.md"
+    },
+    {
+      "path": "doc/architecture-spec.md",
+      "source": "project-files/doc/architecture-spec.md"
+    },
+    {
+      "path": "doc/acceptance-spec.md",
+      "source": "project-files/doc/acceptance-spec.md"
+    },
+    {
+      "path": "doc/open-questions.md",
+      "source": "project-files/doc/open-questions.md"
+    },
+    {
+      "path": "doc/implementation-plan.md",
+      "source": "project-files/doc/implementation-plan.md"
+    }
+  ],
+  "schema_version": 1,
+  "specification": {
+    "approval": {
+      "artifact": "artifact:specification-approval",
+      "node": "approve-specification",
+      "targets": [
+        "author-implementation-plan",
+        "implement"
+      ]
+    },
+    "decisions": [],
+    "documents": [
+      {
+        "artifact": "doc/product-spec.md",
+        "consumer_nodes": [
+          "define-architecture-and-interfaces",
+          "define-acceptance-contract",
+          "verify-specification-set",
+          "author-implementation-plan"
+        ],
+        "id": "product-and-scope",
+        "kind": "product",
+        "path": "doc/product-spec.md",
+        "producer_node": "define-product-and-scope",
+        "required": true
+      },
+      {
+        "artifact": "doc/constraints-and-risks.md",
+        "consumer_nodes": [
+          "define-architecture-and-interfaces",
+          "define-acceptance-contract",
+          "verify-specification-set",
+          "author-implementation-plan"
+        ],
+        "id": "constraints-and-risks",
+        "kind": "constraints",
+        "path": "doc/constraints-and-risks.md",
+        "producer_node": "define-constraints-and-risks",
+        "required": true
+      },
+      {
+        "artifact": "doc/architecture-spec.md",
+        "consumer_nodes": [
+          "inventory-open-decisions",
+          "verify-specification-set",
+          "author-implementation-plan"
+        ],
+        "id": "architecture-and-interfaces",
+        "kind": "architecture",
+        "path": "doc/architecture-spec.md",
+        "producer_node": "define-architecture-and-interfaces",
+        "required": true
+      },
+      {
+        "artifact": "doc/acceptance-spec.md",
+        "consumer_nodes": [
+          "inventory-open-decisions",
+          "verify-specification-set",
+          "author-implementation-plan"
+        ],
+        "id": "acceptance-contract",
+        "kind": "acceptance",
+        "path": "doc/acceptance-spec.md",
+        "producer_node": "define-acceptance-contract",
+        "required": true
+      },
+      {
+        "artifact": "doc/open-questions.md",
+        "consumer_nodes": [
+          "resolve-blocking-decisions",
+          "verify-specification-set",
+          "author-implementation-plan"
+        ],
+        "id": "open-decisions",
+        "kind": "open-questions",
+        "path": "doc/open-questions.md",
+        "producer_node": "inventory-open-decisions",
+        "required": true
+      }
+    ],
+    "implementation_plan": {
+      "artifact": "doc/implementation-plan.md",
+      "implementation_nodes": [
+        "implement"
+      ],
+      "node": "author-implementation-plan",
+      "path": "doc/implementation-plan.md"
+    },
+    "schema_version": 1,
+    "specification_root": "doc",
+    "verification_node": "verify-specification-set"
+  },
+  "terminal_nodes": [
+    "finish"
+  ],
+  "version": 1
+}
