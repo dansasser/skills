@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/graph-development/project-lifecycle-plan.schema.json",
+  "title": "Graph Development project lifecycle plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation",
+    "valid",
+    "dry_run",
+    "base_digest",
+    "plan_digest",
+    "candidate_digest",
+    "changed",
+    "preserved",
+    "invalidated",
+    "blocked",
+    "conflicts",
+    "errors"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "operation": {
+      "enum": ["bootstrap", "update", "migration", "graph-mutation", "run-promotion"]
+    },
+    "valid": {"type": "boolean"},
+    "dry_run": {"const": true},
+    "base_digest": {"$ref": "#/$defs/digest"},
+    "plan_digest": {"$ref": "#/$defs/digest"},
+    "candidate_digest": {"$ref": "#/$defs/digest"},
+    "changed": {"$ref": "#/$defs/paths"},
+    "preserved": {"$ref": "#/$defs/paths"},
+    "invalidated": {"$ref": "#/$defs/paths"},
+    "blocked": {"$ref": "#/$defs/paths"},
+    "conflicts": {"$ref": "#/$defs/paths"},
+    "errors": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/path"}
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/|~|[A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    }
+  }
+}

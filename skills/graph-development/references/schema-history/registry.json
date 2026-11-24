@@ -1,0 +1,55 @@
+{
+  "kinds": {
+    "context": {
+      "current_version": 1,
+      "steps": [
+        {
+          "from_version": 0,
+          "irreversible_boundary": null,
+          "reversible": true,
+          "to_version": 1
+        }
+      ]
+    },
+    "graph": {
+      "current_version": 1,
+      "steps": [
+        {
+          "from_version": 0,
+          "irreversible_boundary": null,
+          "reversible": true,
+          "to_version": 1
+        }
+      ]
+    },
+    "manifest": {
+      "current_version": 1,
+      "steps": [
+        {
+          "from_version": 0,
+          "irreversible_boundary": null,
+          "reversible": true,
+          "to_version": 1
+        }
+      ]
+    },
+    "runtime": {
+      "current_version": 2,
+      "steps": [
+        {
+          "from_version": 0,
+          "irreversible_boundary": "runtime-ledger-append",
+          "reversible": false,
+          "to_version": 1
+        },
+        {
+          "from_version": 1,
+          "irreversible_boundary": "runtime-ledger-append",
+          "reversible": false,
+          "to_version": 2
+        }
+      ]
+    }
+  },
+  "schema_version": 1
+}

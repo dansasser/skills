@@ -1,0 +1,145 @@
+{
+  "schema_version": 2,
+  "skill_name": "graph-development",
+  "provenance": "synthetic-public-release",
+  "frozen": true,
+  "cases": [
+    {
+      "id": "explicit-invocation",
+      "kind": "trigger",
+      "prompt": "Use $graph-development to create and validate this project's development lifecycle graph.",
+      "expected": "trigger",
+      "assertions": [
+        {
+          "type": "skill_used",
+          "skill_name": "$active"
+        }
+      ],
+      "files": []
+    },
+    {
+      "id": "project-policy-opt-in",
+      "kind": "trigger",
+      "prompt": "The applicable project policy explicitly opts this project into $graph-development. Implement the approved bounded change under the existing lifecycle graph.",
+      "expected": "trigger",
+      "assertions": [
+        {
+          "type": "skill_used",
+          "skill_name": "$active"
+        }
+      ],
+      "files": []
+    },
+    {
+      "id": "implicit-lifecycle-request",
+      "kind": "do-not-trigger",
+      "prompt": "Add one validation step to our software workflow. No project policy opts into Graph Development and I am not invoking a skill.",
+      "expected": "do-not-trigger",
+      "assertions": [
+        {
+          "type": "skill_not_used",
+          "skill_name": "$active"
+        }
+      ],
+      "files": []
+    },
+    {
+      "id": "graph-discussion-near-miss",
+      "kind": "do-not-trigger",
+      "prompt": "Explain the tradeoffs between DAG schedulers and state machines. Do not create or operate project lifecycle artifacts.",
+      "expected": "do-not-trigger",
+      "assertions": [
+        {
+          "type": "skill_not_used",
+          "skill_name": "$active"
+        }
+      ],
+      "files": []
+    },
+    {
+      "id": "requested-dlg-growth",
+      "kind": "output",
+      "prompt": "Use $graph-development. Add the requested release-verification node and its declared dependency to the durable DLG, preview the mutation, and do not enroll it in any active run unless the request also maps it to the current outcome.",
+      "expected": "Records requested durable nodes without automatic enrollment.",
+      "assertions": [
+        {
+          "type": "contains",
+          "value": "record-only"
+        },
+        {
+          "type": "contains",
+          "value": "not promoted"
+        }
+      ],
+      "files": []
+    },
+    {
+      "id": "bounded-run-with-backlog",
+      "kind": "output",
+      "prompt": "Use $graph-development for the existing schema-v2 run. Unrelated durable nodes are ready outside the frozen projection. Complete only the projected acceptance work and report backlog separately.",
+      "expected": "Only projected work executes; backlog remains nonblocking.",
+      "assertions": [
+        {
+          "type": "contains",
+          "value": "outcome complete"
+        },
+        {
+          "type": "contains",
+          "value": "backlog"
+        }
+      ],
+      "files": []
+    },
+    {
+      "id": "mapped-acceptance-dependency",
+      "kind": "output",
+      "prompt": "Use $graph-development. The current acceptance check cannot run without one missing fixture. Record it, map it to the existing acceptance item, promote only that bounded dependency, then return to the critical path.",
+      "expected": "Promotes only the acceptance-mapped dependency.",
+      "assertions": [
+        {
+          "type": "contains",
+          "value": "acceptance mapping"
+        },
+        {
+          "type": "contains",
+          "value": "critical path"
+        }
+      ],
+      "files": []
+    },
+    {
+      "id": "adjacent-enhancement-deferred",
+      "kind": "output",
+      "prompt": "Use $graph-development. While implementing the approved outcome you discover a useful adjacent enhancement that is not required by any current acceptance item. Preserve it durably without executing it.",
+      "expected": "Records or defers the enhancement outside the run.",
+      "assertions": [
+        {
+          "type": "contains",
+          "value": "deferred"
+        },
+        {
+          "type": "contains",
+          "value": "not executed"
+        }
+      ],
+      "files": []
+    },
+    {
+      "id": "outcome-complete-with-backlog",
+      "kind": "output",
+      "prompt": "Use $graph-development. All projected acceptance work is verified while durable backlog remains. Complete the current run and report the backlog without opening more work.",
+      "expected": "Completion follows the outcome contract, not whole-DLG greenness.",
+      "assertions": [
+        {
+          "type": "contains",
+          "value": "completed"
+        },
+        {
+          "type": "contains",
+          "value": "backlog remains"
+        }
+      ],
+      "files": []
+    }
+  ]
+}

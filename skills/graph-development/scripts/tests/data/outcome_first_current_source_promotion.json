@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "case_id": "current-source-four-to-five-node-record-only",
+  "mutation_id": "record-unmapped-audit",
+  "node": {
+    "id": "scope-unmapped-audit",
+    "type": "verification",
+    "output": {
+      "name": "audit result",
+      "artifact": "artifact:scope-unmapped-audit",
+      "format": "json"
+    }
+  },
+  "edges": [
+    {
+      "id": "tests-require-unmapped-audit",
+      "from": "run-tests",
+      "to": "scope-unmapped-audit",
+      "type": "requires",
+      "artifacts": []
+    },
+    {
+      "id": "unmapped-audit-requires-finish",
+      "from": "scope-unmapped-audit",
+      "to": "finish-change",
+      "type": "requires",
+      "artifacts": []
+    }
+  ],
+  "expected": {
+    "durable_graph_node_delta": 1,
+    "run_node_delta": 0,
+    "prior_terminal_state": "verified",
+    "run_status": "completed"
+  },
+  "provenance": {
+    "source_revision": "32093c6",
+    "source_harness": "graph-development-forensics/scripts/reproduce_active_run_promotion.py",
+    "transcript_content": "none"
+  }
+}
