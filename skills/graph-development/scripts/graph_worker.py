@@ -19,7 +19,7 @@ from context_core import (
     plan_context,
 )
 from context_store import ContextStore
-from graph_core import GraphControlError, RuntimeStateError, atomic_write_json, load_json, resolve_within
+from graph_core import GraphControlError, RuntimeStateError, StaleStateError, atomic_write_json, load_json, resolve_within
 from graphctl import (
     claim_node,
     complete_node,
@@ -107,9 +107,62 @@ def _digest_path(path: Path, project_root: Path) -> dict[str, Any]:
 
 
 def _read_preview(path: Path, limit: int) -> tuple[str, bool, int]:
-    payload = path.read_bytes() if path.exists() else b""
-    truncated = len(payload) > limit
-    return payload[:limit].decode("utf-8", errors="replace"), truncated, len(payload)
+    if not path.exists():
+        return "", False, 0
+    with path.open("rb") as handle:
+        payload = handle.read(limit)
+        size = os.fstat(handle.fileno()).st_size
+    return payload.decode("utf-8", errors="replace"), size > limit, size
+
+
+def _finalize_node(
+    graph_path: Path,
+    run_dir: Path,
+    node_id: str,
+    worker_id: str,
+    claimed: dict[str, Any],
+    evidence: dict[str, Any],
+    *,
+    success: bool,
+) -> dict[str, Any]:
+    """Record an already executed result without adopting a replacement claim."""
+    original = claimed["nodes"][node_id]
+    original_lease = original.get("lease")
+    if (
+        original.get("state") != "running"
+        or not isinstance(original_lease, dict)
+        or original_lease.get("owner") != worker_id
+        or not original_lease.get("idempotency_key")
+    ):
+        raise RuntimeStateError("original execution claim has no owned lease")
+    for attempt in range(5):
+        current = load_run(run_dir)
+        state = current["nodes"].get(node_id, {})
+        lease = state.get("lease")
+        if (
+            any(current.get(key) != claimed.get(key) for key in ("run_id", "graph_id", "schema_version"))
+            or run_execution_checksum(current) != run_execution_checksum(claimed)
+            or current.get("projection") != claimed.get("projection")
+            or current.get("outcome_contract") != claimed.get("outcome_contract")
+            or state.get("state") != "running"
+            or state.get("generation") != original["generation"]
+            or state.get("attempts") != original["attempts"]
+            or not isinstance(lease, dict)
+            or lease.get("owner") != original_lease["owner"]
+            or lease.get("idempotency_key") != original_lease["idempotency_key"]
+        ):
+            raise StaleStateError(f"execution claim changed for node {node_id}; result evidence is retained for recovery")
+        try:
+            finalizer = complete_node if success else fail_node
+            return finalizer(graph_path, run_dir, node_id, worker_id, current["run_version"], evidence)
+        except StaleStateError as exc:
+            # CAS fences a change after the identity check; retry only this result.
+            if attempt == 4:
+                raise StaleStateError(
+                    f"could not finalize node {node_id} after 5 concurrent updates; "
+                    "result evidence is retained for recovery without rerunning the command"
+                ) from exc
+    raise AssertionError("unreachable finalization retry state")
 
 
 def claim_context_node(
@@ -298,13 +351,13 @@ def execute_node(
     project_root = project_root_for_graph(graph_path, graph)
     if not project_root.is_dir():
         result = {"exit_code": None, "timed_out": False, "error": f"project root does not exist: {project_root}"}
-        failed = fail_node(graph_path, run_dir, node_id, worker_id, claimed["run_version"], result)
+        failed = _finalize_node(graph_path, run_dir, node_id, worker_id, claimed, result, success=False)
         return {**result, "state": failed["nodes"][node_id]["state"], "run_version": failed["run_version"]}
 
     working_directory = resolve_within(project_root, definition["execution"].get("working_directory", "."))
     if not working_directory.is_dir():
         result = {"exit_code": None, "timed_out": False, "error": f"working directory does not exist: {working_directory}"}
-        failed = fail_node(graph_path, run_dir, node_id, worker_id, claimed["run_version"], result)
+        failed = _finalize_node(graph_path, run_dir, node_id, worker_id, claimed, result, success=False)
         return {**result, "state": failed["nodes"][node_id]["state"], "run_version": failed["run_version"]}
 
     evidence_dir = run_dir / "evidence" / node_id
@@ -336,12 +389,27 @@ def execute_node(
                 exit_code = process.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                os.killpg(process.pid, signal.SIGTERM)
+                termination_deadline = time.monotonic() + 2
                 try:
-                    exit_code = process.wait(timeout=2)
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
+                    pass
+                # A reaped leader does not prove its process group has exited.
+                while (remaining := termination_deadline - time.monotonic()) > 0:
+                    try:
+                        os.killpg(process.pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(min(.05, remaining))
+                try:
                     os.killpg(process.pid, signal.SIGKILL)
-                    exit_code = process.wait(timeout=2)
+                except ProcessLookupError:
+                    pass
+                exit_code = process.wait(timeout=2)
         except OSError as exc:
             spawn_error = str(exc)
     duration = round(time.monotonic() - started, 6)
@@ -370,10 +438,7 @@ def execute_node(
     }
     atomic_write_json(result_path, evidence)
     success = exit_code == 0 and not timed_out and spawn_error is None
-    if success:
-        after = complete_node(graph_path, run_dir, node_id, worker_id, claimed["run_version"], evidence)
-    else:
-        after = fail_node(graph_path, run_dir, node_id, worker_id, claimed["run_version"], evidence)
+    after = _finalize_node(graph_path, run_dir, node_id, worker_id, claimed, evidence, success=success)
     return {
         "node_id": node_id,
         "attempt": attempt,

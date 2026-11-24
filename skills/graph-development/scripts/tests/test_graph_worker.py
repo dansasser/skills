@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -21,12 +25,14 @@ from fixtures import (
     runtime_graph,
 )  # noqa: E402
 from graph_core import RuntimeStateError, atomic_write_json  # noqa: E402
+from graph_core import StaleStateError  # noqa: E402
+import graph_worker  # noqa: E402
 from graph_worker import (  # noqa: E402
     _minimal_environment,
     claim_context_node,
     execute_node,
 )
-from graphctl import initialize_run, status_report  # noqa: E402
+from graphctl import approve_node, claim_node, initialize_run, load_run, status_report  # noqa: E402
 
 
 class GraphWorkerTests(unittest.TestCase):
@@ -88,6 +94,234 @@ class GraphWorkerTests(unittest.TestCase):
             result = execute_node(graph_path, run_dir, node["id"], "worker-1", run["run_version"])
             self.assertTrue(result["timed_out"])
             self.assertEqual(result["state"], "failed")
+
+    def _timeout_with_descendant(self, *, cleanup_delay: float | None = None) -> None:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+        child = None
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                graph = runtime_graph(root)
+                child_code = (
+                    "import os,signal,time; from pathlib import Path; "
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                    "Path('child.pid').write_text(str(os.getpid())); time.sleep(30)"
+                )
+                if cleanup_delay is not None:
+                    child_code = (
+                        "import os,signal,time; from pathlib import Path\n"
+                        "def cleanup(signum, frame):\n"
+                        f"    time.sleep({cleanup_delay!r})\n"
+                        "    Path('cleanup-complete').touch()\n"
+                        "    raise SystemExit(0)\n"
+                        "signal.signal(signal.SIGTERM, cleanup)\n"
+                        "Path('child.pid').write_text(str(os.getpid()))\n"
+                        "time.sleep(30)"
+                    )
+                parent_code = (
+                    "import subprocess,sys,time; from pathlib import Path; "
+                    f"subprocess.Popen([sys.executable, '-c', {child_code!r}]);\n"
+                    "while not Path('child.pid').exists(): time.sleep(.01)\n"
+                    "time.sleep(30)"
+                )
+                graph["nodes"][0]["execution"].update(
+                    command=[sys.executable, "-c", parent_code], timeout_seconds=1
+                )
+                graph_path, run_dir, run = self._setup(root, graph)
+                try:
+                    result = execute_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"])
+                    child = int((root / "child.pid").read_text())
+                    deadline = time.monotonic() + 2
+                    child_exited = False
+                    while time.monotonic() < deadline:
+                        try:
+                            child_exited = os.waitid(os.P_PID, child, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+                        except ChildProcessError:
+                            child_exited = True
+                        if child_exited:
+                            break
+                        time.sleep(.01)
+                    self.assertTrue(result["timed_out"])
+                    self.assertEqual(result["state"], "failed")
+                    self.assertTrue(child_exited, "timed-out descendant survived its parent")
+                    if cleanup_delay is not None:
+                        self.assertTrue((root / "cleanup-complete").exists(), "descendant lost its TERM cleanup grace")
+                finally:
+                    if child is None and (root / "child.pid").exists():
+                        child = int((root / "child.pid").read_text())
+        finally:
+            if child is not None:
+                try:
+                    os.kill(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    os.waitpid(child, 0)
+                except ChildProcessError:
+                    pass
+            libc.prctl(36, previous.value, 0, 0, 0)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux child reaping")
+    def test_timeout_kills_descendant_after_parent_exits(self) -> None:
+        self._timeout_with_descendant()
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux child reaping")
+    def test_timeout_preserves_descendant_term_cleanup_grace(self) -> None:
+        self._timeout_with_descendant(cleanup_delay=.2)
+
+    def _execute_with_unrelated_approval(self, exit_code: int, *, race_finalization: bool = False) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph = graph_with_gate(root)
+            command = (
+                "from pathlib import Path; import sys,time; "
+                "Path('executions').open('a').write('executed\\n'); "
+                "Path('ready').touch();\n"
+                + ("while not Path('release').exists(): time.sleep(.01)\n" if not race_finalization else "")
+                + f"sys.exit({exit_code})"
+            )
+            graph["nodes"][0]["execution"].update(
+                command=[sys.executable, "-c", command], timeout_seconds=5
+            )
+            graph_path, run_dir, run = self._setup_v2(root, graph)
+            real_popen = subprocess.Popen
+            finalizer_name = "complete_node" if exit_code == 0 else "fail_node"
+            real_finalizer = getattr(graph_worker, finalizer_name)
+            approvals = []
+
+            def approve() -> None:
+                current = load_run(run_dir)
+                approvals.append(approve_node(graph_path, run_dir, "approve-change", "human", current["run_version"], "fixture approval"))
+
+            def start(*args, **kwargs):
+                process = real_popen(*args, **kwargs)
+                if not race_finalization:
+                    try:
+                        deadline = time.monotonic() + 3
+                        while not (root / "ready").exists() and process.poll() is None and time.monotonic() < deadline:
+                            time.sleep(.01)
+                        self.assertTrue((root / "ready").exists(), "command did not reach handshake")
+                        approve()
+                        (root / "release").touch()
+                    except BaseException:
+                        process.kill()
+                        process.wait()
+                        raise
+                return process
+
+            calls = []
+
+            def finalize(*args, **kwargs):
+                calls.append(args[4])
+                if race_finalization and len(calls) == 1:
+                    approve()
+                return real_finalizer(*args, **kwargs)
+
+            with mock.patch.object(graph_worker.subprocess, "Popen", side_effect=start), mock.patch.object(graph_worker, finalizer_name, side_effect=finalize):
+                result = execute_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"])
+            self.assertEqual(result["state"], "verified" if exit_code == 0 else "failed")
+            self.assertEqual(result["exit_code"], exit_code)
+            self.assertEqual((root / "executions").read_text(), "executed\n")
+            self.assertEqual(len(approvals), 1)
+            self.assertEqual(len(calls), 2 if race_finalization else 1)
+            self.assertEqual(load_run(run_dir)["nodes"]["approve-change"]["state"], "verified")
+
+    def _setup_v2(self, root: Path, graph: dict) -> tuple[Path, Path, dict]:
+        graph_path = root / "development-graph.json"
+        run_dir = root / ".development-graph"
+        atomic_write_json(graph_path, graph)
+        run = initialize_run(graph_path, run_dir, actor="test", outcome_contract=outcome_contract(graph), projection=outcome_projection(graph))
+        return graph_path, run_dir, run
+
+    def test_completion_accepts_unrelated_approval_without_reexecution(self) -> None:
+        self._execute_with_unrelated_approval(0)
+
+    def test_failure_accepts_unrelated_approval_without_reexecution(self) -> None:
+        self._execute_with_unrelated_approval(7)
+
+    def test_finalization_retries_concurrent_update_without_reexecution(self) -> None:
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code):
+                self._execute_with_unrelated_approval(exit_code, race_finalization=True)
+
+    def test_finalization_rejects_replaced_claim_or_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph_path, run_dir, run = self._setup_v2(root, runtime_graph(root))
+            claimed = claim_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"])
+            changes = {
+                "run": lambda value: value.update(run_id="different-run"),
+                "graph": lambda value: value.update(graph_id="different-graph"),
+                "schema": lambda value: value.update(schema_version=1),
+                "execution": lambda value: value["projection"].update(checksum="0" * 64),
+                "outcome": lambda value: value["outcome_contract"].update(outcome_digest="0" * 64),
+                "generation": lambda value: value["nodes"]["inspect-context"].update(generation=2),
+                "attempt": lambda value: value["nodes"]["inspect-context"].update(attempts=2),
+                "state": lambda value: value["nodes"]["inspect-context"].update(state="verified"),
+                "lease-owner": lambda value: value["nodes"]["inspect-context"]["lease"].update(owner="someone-else"),
+                "lease-key": lambda value: value["nodes"]["inspect-context"]["lease"].update(idempotency_key="different-attempt"),
+            }
+            for label, change in changes.items():
+                for success in (False, True):
+                    with self.subTest(change=label, success=success):
+                        current = copy.deepcopy(claimed)
+                        change(current)
+                        with mock.patch.object(graph_worker, "load_run", return_value=current), mock.patch.object(graph_worker, "complete_node") as complete, mock.patch.object(graph_worker, "fail_node") as fail:
+                            with self.assertRaisesRegex(StaleStateError, "claim changed"):
+                                graph_worker._finalize_node(graph_path, run_dir, "inspect-context", "worker", claimed, {}, success=success)
+                        complete.assert_not_called()
+                        fail.assert_not_called()
+
+    def test_finalization_stops_after_bounded_stale_retries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph_path, run_dir, run = self._setup(root, runtime_graph(root))
+            claimed = claim_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"])
+            with mock.patch.object(graph_worker, "complete_node", side_effect=StaleStateError("concurrent update")) as complete:
+                with self.assertRaises(StaleStateError):
+                    graph_worker._finalize_node(graph_path, run_dir, "inspect-context", "worker", claimed, {}, success=True)
+            self.assertGreater(complete.call_count, 1)
+            self.assertLessEqual(complete.call_count, 10)
+
+    def test_finalization_allows_observed_definition_change_with_same_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph_path, run_dir, run = self._setup_v2(root, runtime_graph(root))
+            claimed = claim_node(graph_path, run_dir, "inspect-context", "worker", run["run_version"])
+            current = copy.deepcopy(claimed)
+            current["observed_graph_checksum"] = "0" * 64
+            current["observed_graph_version"] += 1
+            current["run_version"] += 1
+            with mock.patch.object(graph_worker, "load_run", return_value=current), mock.patch.object(graph_worker, "complete_node", return_value=current) as complete:
+                graph_worker._finalize_node(graph_path, run_dir, "inspect-context", "worker", claimed, {}, success=True)
+            self.assertEqual(complete.call_args.args[4], current["run_version"])
+
+    def test_preview_reads_only_prefix_and_reports_full_size(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "stdout.log"
+            with path.open("wb") as handle:
+                handle.write(b"sample output")
+                handle.truncate(1024 * 1024)
+            with path.open("rb") as handle:
+                guarded = mock.MagicMock(wraps=handle)
+                guarded.__enter__.return_value = guarded
+                guarded.__exit__.return_value = False
+
+                def read(size=-1):
+                    self.assertGreaterEqual(size, 0, "preview attempted an unbounded read")
+                    self.assertLessEqual(size, 6)
+                    return handle.read(size)
+
+                guarded.read.side_effect = read
+                with mock.patch.object(Path, "open", return_value=guarded):
+                    preview, truncated, size = graph_worker._read_preview(path, 6)
+            self.assertEqual((preview, truncated, size), ("sample", True, 1024 * 1024))
+            self.assertEqual(graph_worker._read_preview(path.parent / "missing", 6), ("", False, 0))
 
     def test_rejects_shell_string_and_unapproved_destructive_node(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
