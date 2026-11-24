@@ -1,7 +1,0 @@
-interface:
-  display_name: "Graph Development"
-  short_description: "Build and operate bounded lifecycle graphs"
-  default_prompt: "Use $graph-development to build or operate this project's validated development lifecycle graph while keeping the approved outcome and current run projection as the execution scope ceiling."
-
-policy:
-  allow_implicit_invocation: false

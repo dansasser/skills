@@ -22,17 +22,6 @@ npx skills@1.9.0 add dansasser/skills --skill mesh-painting --agent claude-code 
 
 The project skill directory is `.claude/skills/mesh-painting/`.
 
-### Graph Development
-
-Select Graph Development from a collection revision containing the skill:
-
-```sh
-npx skills@1.9.0 add dansasser/skills --skill graph-development --agent codex --copy
-npx skills@1.9.0 add dansasser/skills --skill graph-development --agent claude-code --copy
-```
-
-Its project directories are `.agents/skills/graph-development/` for Codex and `.claude/skills/graph-development/` for Claude Code. Invoke `$graph-development` in Codex or `/graph-development` in Claude Code, or adopt the skill's bounded project opt-in policy. The OpenAI metadata disables implicit invocation in Codex. Claude Code has separate [invocation controls](https://code.claude.com/docs/en/skills#control-who-invokes-a-skill) and may load skills automatically; that host policy is not configured by the OpenAI metadata. The portable skill instructions retain the explicit-invocation/project-opt-in boundary.
-
 Omit `--agent` to choose an agent interactively. Add `--global` for a user-wide installation; review the destination before replacing an existing skill.
 
 List the available skills without installing:
@@ -57,14 +46,12 @@ Clone the collection outside your agent's skill directory:
 git clone https://github.com/dansasser/skills.git
 ```
 
-Copy the complete `skills/mesh-painting` or `skills/graph-development` folder from that checkout into your agent's supported project or user skill location. Preserve `SKILL.md`, scripts, references, assets and the license together. Do not place the entire collection repository inside a directory intended for one skill.
+Copy the complete `skills/mesh-painting` folder from that checkout into your agent's supported project or user skill location. Preserve `SKILL.md`, scripts, references, assets and the license together. Do not place the entire collection repository inside a directory intended for one skill.
 
 | Agent | Project location | User location | Explicit invocation |
 | --- | --- | --- | --- |
 | Codex | `.agents/skills/mesh-painting/` | `~/.agents/skills/mesh-painting/` | `$mesh-painting` |
 | Claude Code | `.claude/skills/mesh-painting/` | `~/.claude/skills/mesh-painting/` | `/mesh-painting` |
-| Codex | `.agents/skills/graph-development/` | `~/.agents/skills/graph-development/` | `$graph-development` |
-| Claude Code | `.claude/skills/graph-development/` | `~/.claude/skills/graph-development/` | `/graph-development` |
 
 Keep every supporting file with the skill; installing only `SKILL.md` omits its engine and resources. These conventions follow the [Codex skill documentation](https://learn.chatgpt.com/docs/build-skills) and [Claude Code skill documentation](https://code.claude.com/docs/en/skills).
 
@@ -87,8 +74,6 @@ Open `workspace/out/lighthouse_preview.png`. Follow the [general mesh-painting w
 
 Default painting uses the preserved `legacy-seven` recipe. Image-dependent `adaptive-v1` painting is opt-in; follow the skill README for controls and honest completed/stopped outcomes. The environment and output-generation protocol are the same for either policy.
 
-Graph Development uses Linux/Python 3.12+ and the standard library. Follow its [complete schema-v2 quick start](../skills/graph-development/README.md#quick-start) to preview/apply all prerequisite files, execute the synthetic deterministic task and inspect its output, run status and event ledger. Keep the example project outside the installed skill folder.
-
 Start a fresh agent session in the project and invoke the skill explicitly. Installation/file verification and direct renderer output do not establish that a particular agent session discovered the skill or followed its visual-review workflow; verify those behaviors through normal use.
 
 ## Compatibility
@@ -96,7 +81,6 @@ Start a fresh agent session in the project and invoke the skill explicitly. Inst
 | Skill | Agent-facing support | Execution requirements |
 | --- | --- | --- |
 | Mesh Painting | Standard Agent Skills instructions; Codex and Claude Code project-copy installation paths are documented | Linux, Python 3.10+, NumPy/SciPy/Pillow, `findmnt` and procfs; process forking, signals, locking and address-space limits; a PNG-viewing tool; optional C compiler |
-| Graph Development | Standard Agent Skills instructions; explicit Codex/Claude Code invocation and project opt-in documented | Linux, Python 3.12+, standard library, POSIX file locking/process controls; current verification targets Python 3.12 |
 
 Native Windows, macOS and hosted ChatGPT rendering have not been verified. A Linux execution environment must satisfy the requirements in the [skill README](../skills/mesh-painting/README.md#requirements). Agent Skills compatibility does not change those requirements.
 
