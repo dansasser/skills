@@ -160,13 +160,27 @@ python3 scripts/graph_worker.py \
   --node implement-feature \
   --worker-id capsule-worker \
   --expected-run-version 7 \
-  --context-plan
+  --context-plan \
+  --include-envelope
 ```
 
 Success leaves the node `running` under the returned lease and idempotency key,
-and persists the envelope record before handing control to an adapter. Planning
-failure records a failed attempt. Preview planning belongs in `contextctl` and
-never claims a node.
+and persists its envelope record. The optional `--include-envelope` flag adds
+the exact claimed `sealed_envelope` to the JSON response for an authorized
+adapter handoff. Pass that envelope and the returned `idempotency_key` to
+`CapsuleAdapter.invoke`. Python callers can request the same handoff with
+`claim_context_node(..., include_envelope=True)`.
+
+Without this flag, the response contains metadata only. Digest-only envelope
+records omit payload content in both cases. The explicit handoff includes
+context content in stdout or the Python return value; the caller controls its
+routing and retention. The worker does not invoke a provider or grant an
+adapter additional authority.
+
+The claimed envelope binds the run, version, generation and attempt. An offline
+`contextctl plan --envelope-output` export has a different checkpoint and does
+not recover that claimed seal. Planning failure records a failed attempt.
+Preview planning belongs in `contextctl` and never claims a node.
 
 ## Broker boundary
 

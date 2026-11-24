@@ -175,6 +175,8 @@ def claim_context_node(
     node_id: str,
     worker_id: str,
     expected_run_version: int,
+    *,
+    include_envelope: bool = False,
 ) -> dict[str, Any]:
     """Claim an opt-in V3 model node and persist its sealed context envelope."""
 
@@ -304,7 +306,7 @@ def claim_context_node(
             f"context planning failed and node is {failed['nodes'][node_id]['state']}: {exc}"
         ) from exc
     lease = claimed["nodes"][node_id]["lease"]
-    return {
+    result = {
         "node_id": node_id,
         "state": "running",
         "run_version": claimed["run_version"],
@@ -315,6 +317,9 @@ def claim_context_node(
         "envelope_record": record.relative_to(run_dir).as_posix(),
         "idempotency_key": lease["idempotency_key"],
     }
+    if include_envelope:
+        result["sealed_envelope"] = envelope
+    return result
 
 
 def execute_node(
@@ -481,12 +486,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="claim an opt-in V3 agent/hybrid node and seal its context",
     )
+    parser.add_argument(
+        "--include-envelope",
+        action="store_true",
+        help="include the full sealed envelope and raw context in context-plan JSON output",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.include_envelope and not args.context_plan:
+            raise RuntimeStateError("--include-envelope requires --context-plan")
         if args.context_plan:
             if args.next_node or not args.node:
                 raise RuntimeStateError(
@@ -498,6 +510,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.node,
                 args.worker_id,
                 args.expected_run_version,
+                include_envelope=args.include_envelope,
             )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["state"] == "running" else 1

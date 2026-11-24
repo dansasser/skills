@@ -35,6 +35,8 @@ from graph_worker import (  # noqa: E402
     execute_node,
 )
 from graphctl import approve_node, claim_node, initialize_run, invalidate_nodes, load_run, resume_nodes, status_report  # noqa: E402
+from context_core import DeterministicWordTokenizer, validate_envelope  # noqa: E402
+from fake_capsule_adapter import FakeCapsuleAdapter  # noqa: E402
 
 
 class GraphWorkerTests(unittest.TestCase):
@@ -500,6 +502,9 @@ class GraphWorkerTests(unittest.TestCase):
 
             self.assertEqual(planned["state"], "running")
             self.assertEqual(planned["adapter"], "fake-deterministic")
+            self.assertNotIn("sealed_envelope", planned)
+            self.assertNotIn("PRIVATE RUNTIME CONTEXT", json.dumps(planned))
+            self._assert_digest_only_run(run_dir)
             record = (
                 run_dir
                 / "context/envelopes"
@@ -529,6 +534,121 @@ class GraphWorkerTests(unittest.TestCase):
             )
             status = status_report(graph_path, run_dir)
             self.assertEqual(status["state_counts"]["running"], 1)
+
+    def _context_plan_fixture(self, root: Path, *, input_limit: int = 1000) -> tuple:
+        graph = runtime_graph(root)
+        target = next(node for node in graph["nodes"] if node["id"] == "implement-change")
+        target["executor"]["kind"] = "agent"
+        for field in ("command", "working_directory", "environment", "evidence_paths", "capture_limit_bytes", "timeout_seconds"):
+            target["execution"].pop(field, None)
+        target["context_control"] = {
+            "version": 3, "plan_path": "context/claim-plan.json", "mode": "executable",
+            "tokenizer": "deterministic-word-v1", "adapter": "fake-deterministic", "retention": "digest-only",
+        }
+        plan = {
+            "artifact_registry": {"artifact:context": {
+                "content": "PRIVATE RUNTIME CONTEXT", "source": "artifacts/context.json",
+                "requirements": ["evidence-exists"], "authorized": True, "fresh": True, "provenance_complete": True,
+            }},
+            "mandatory_extras": [], "optional_candidates": [], "requirement_weights": {},
+            "budget": {"input_limit": input_limit, "output_reserve": 100, "safety_margin": 20},
+        }
+        plan_path = root / "context/claim-plan.json"
+        plan_path.parent.mkdir()
+        atomic_write_json(plan_path, plan)
+        graph_path, run_dir, run = self._setup_v2(root, graph)
+        inspected = execute_node(graph_path, run_dir, "inspect-context", "context-worker", run["run_version"])
+        return graph_path, run_dir, inspected
+
+    def _assert_digest_only_run(self, run_dir: Path) -> None:
+        for path in run_dir.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(b"PRIVATE RUNTIME CONTEXT", path.read_bytes(), str(path.relative_to(run_dir)))
+
+    def _assert_transient_claim(self, planned: dict, run_dir: Path) -> None:
+        envelope = planned["sealed_envelope"]
+        self.assertEqual(validate_envelope(envelope), [])
+        self.assertIn("PRIVATE RUNTIME CONTEXT", json.dumps(envelope))
+        self.assertEqual(envelope["digest"], planned["envelope_digest"])
+        self.assertEqual(envelope["envelope_id"], planned["envelope_id"])
+        run = load_run(run_dir)
+        state = run["nodes"]["implement-change"]
+        self.assertEqual(planned["idempotency_key"], state["lease"]["idempotency_key"])
+        self.assertEqual(envelope["execution_context"]["checkpoint_id"], f"{run['run_id']}:{planned['run_version']}:{state['generation']}:{state['attempts']}")
+        adapter = FakeCapsuleAdapter(
+            tokenizer=DeterministicWordTokenizer("deterministic-word-v1"), context_limit=1000,
+            handler=lambda received: {"status": "completed", "output_artifacts": ["artifact:implementation"], "result_payload": {"accepted": True}},
+        )
+        result = adapter.invoke(envelope, planned["idempotency_key"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(adapter.invocation_count, 1)
+        retained = json.loads((run_dir / planned["envelope_record"]).read_text())
+        self.assertFalse(retained["payload_retained"])
+        self.assertNotIn("payload", retained)
+        self._assert_digest_only_run(run_dir)
+
+    def _context_claim_command(self, graph_path: Path, run_dir: Path, run_version: int) -> list[str]:
+        return [sys.executable, "-B", str(SCRIPTS / "graph_worker.py"), "--graph", str(graph_path), "--run-dir", str(run_dir), "--node", "implement-change", "--worker-id", "context-worker", "--expected-run-version", str(run_version)]
+
+    def test_context_claim_api_can_return_exact_envelope_without_retaining_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            graph_path, run_dir, inspected = self._context_plan_fixture(Path(directory))
+            planned = claim_context_node(graph_path, run_dir, "implement-change", "context-worker", inspected["run_version"], include_envelope=True)
+            self._assert_transient_claim(planned, run_dir)
+
+    def test_context_claim_cli_envelope_output_is_explicit_and_digest_only_on_disk(self) -> None:
+        for include in (False, True):
+            with self.subTest(include=include), tempfile.TemporaryDirectory() as directory:
+                graph_path, run_dir, inspected = self._context_plan_fixture(Path(directory))
+                command = self._context_claim_command(graph_path, run_dir, inspected["run_version"]) + ["--context-plan"]
+                if include:
+                    command.append("--include-envelope")
+                result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                planned = json.loads(result.stdout)
+                if include:
+                    self._assert_transient_claim(planned, run_dir)
+                else:
+                    self.assertNotIn("sealed_envelope", planned)
+                    self.assertNotIn("PRIVATE RUNTIME CONTEXT", result.stdout)
+                    self._assert_digest_only_run(run_dir)
+
+    def test_include_envelope_without_context_plan_rejects_before_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            graph_path, run_dir, inspected = self._context_plan_fixture(Path(directory))
+            before = {path.relative_to(run_dir): path.read_bytes() for path in run_dir.rglob("*") if path.is_file()}
+            result = subprocess.run(self._context_claim_command(graph_path, run_dir, inspected["run_version"]) + ["--include-envelope"], capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--include-envelope requires --context-plan", result.stderr)
+            after = {path.relative_to(run_dir): path.read_bytes() for path in run_dir.rglob("*") if path.is_file()}
+            self.assertEqual(after, before)
+
+    def test_context_claim_failures_never_emit_raw_context(self) -> None:
+        for input_limit in (0, 1):
+            for cli in (False, True):
+                with self.subTest(input_limit=input_limit, cli=cli), tempfile.TemporaryDirectory() as directory:
+                    graph_path, run_dir, inspected = self._context_plan_fixture(Path(directory), input_limit=input_limit)
+                    if cli:
+                        result = subprocess.run(self._context_claim_command(graph_path, run_dir, inspected["run_version"]) + ["--context-plan", "--include-envelope"], capture_output=True, text=True, timeout=10)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertNotIn("PRIVATE RUNTIME CONTEXT", result.stdout + result.stderr)
+                        self.assertEqual(load_run(run_dir)["nodes"]["implement-change"]["state"], "failed")
+                        if result.stdout:
+                            summary = json.loads(result.stdout)
+                            self.assertEqual(summary["status"], "mandatory_overflow")
+                            self.assertNotIn("sealed_envelope", summary)
+                        else:
+                            self.assertIn("context planning failed", result.stderr)
+                    elif input_limit == 0:
+                        with self.assertRaisesRegex(RuntimeStateError, "context planning failed") as error:
+                            claim_context_node(graph_path, run_dir, "implement-change", "context-worker", inspected["run_version"], include_envelope=True)
+                        self.assertNotIn("PRIVATE RUNTIME CONTEXT", str(error.exception))
+                    else:
+                        planned = claim_context_node(graph_path, run_dir, "implement-change", "context-worker", inspected["run_version"], include_envelope=True)
+                        self.assertEqual(planned["status"], "mandatory_overflow")
+                        self.assertNotIn("sealed_envelope", planned)
+                        self.assertNotIn("PRIVATE RUNTIME CONTEXT", json.dumps(planned))
+                    self._assert_digest_only_run(run_dir)
 
 
     def test_v2_worker_executes_projection_and_rejects_dlg_backlog(self) -> None:
