@@ -9,7 +9,7 @@ For one clip, the agent can give you a short timeline or answer a question about
 ## Requirements
 
 - The helper uses the Python standard library and has been tested on Linux with Python 3.10 and 3.14.
-- FFmpeg and ffprobe with support for the supplied media. The agent needs a readable input file, a writable location for the evidence and an image viewer. Findings about sound require listening to the passage or measuring the feature in question.
+- FFmpeg 5.1 or newer and ffprobe, both with support for the supplied media. Frame extraction uses the FFmpeg option `-fps_mode passthrough`. The agent needs a readable input file, a writable location for the evidence and an image viewer. Findings about sound require listening to the passage or measuring the feature in question.
 - For speech transcription, a local `whisper-cli` executable from whisper.cpp and a compatible model. These are optional for visual analysis and audio extraction.
 
 ## Install
