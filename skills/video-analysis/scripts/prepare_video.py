@@ -125,8 +125,18 @@ class Media:
             return
         before = self.origin
         if mode == "window":
-            first, last = selection
-            chooser = f"trim=start={first+before:.9f}:end={last+before:.9f}"
+            # Round both bounds up to native ticks to include precisely [start, end).
+            try:
+                time_base = Fraction(stream["time_base"])
+                if time_base <= 0:
+                    raise ValueError
+            except (ValueError, TypeError, ZeroDivisionError) as exc:
+                raise MediaError("The video has no valid time base for frame-window selection.") from exc
+            origin = Fraction(str(before))
+            start_pts, end_pts = (
+                math.ceil((origin + Fraction(str(bound))) / time_base) for bound in selection
+            )
+            chooser = f"trim=start_pts={start_pts}:end_pts={end_pts}"
         elif requested_pts is not None:
             chooser = f"trim=start_pts={requested_pts}:end_pts={requested_pts + 1}"
         elif mode == "still":
