@@ -1,0 +1,4 @@
+interface:
+  display_name: "Video Analysis"
+  short_description: "Examine supplied clips and compare editing style"
+  default_prompt: "Use $video-analysis to examine these supplied videos and explain the editing choices with timed examples."
