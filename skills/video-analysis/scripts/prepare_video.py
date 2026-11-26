@@ -118,7 +118,7 @@ class Media:
         write_json(self.directory / "metadata.json", metadata)
         step(self.index, "probe", "ok", "Selected default audio and picture streams where available. See metadata.json.")
 
-    def visuals(self, mode, selection, interval):
+    def visuals(self, mode, selection, interval, requested_pts=None):
         stream = self.index["streams"].get("video")
         if stream is None:
             step(self.index, "visual", "unavailable", "The input contains no picture stream.")
@@ -127,8 +127,10 @@ class Media:
         if mode == "window":
             first, last = selection
             chooser = f"trim=start={first+before:.9f}:end={last+before:.9f}"
+        elif requested_pts is not None:
+            chooser = f"trim=start_pts={requested_pts}:end_pts={requested_pts + 1}"
         elif mode == "still":
-            chooser = f"select='gte(t,{selection[0]+before:.9f})'"
+            chooser = f"select='gte(t,{selection[0] + before!r})'"
         else:
             elapsed = f"(t-({before:.9f}))"
             previous = f"(prev_t-({before:.9f}))"
@@ -167,6 +169,8 @@ class Media:
             raise MediaError("No image decoded at the requested time or interval.")
         if not pts or len(pts) < len(files) or (mode != "still" and len(pts) != len(files)):
             raise MediaError("Could not pair every decoded image with a source timestamp.")
+        if requested_pts is not None and int(pts[0][0]) != requested_pts:
+            raise MediaError("No image decoded at the requested presentation timestamp.")
         time_base = Fraction(tb[1]) if tb else None
         for path, (ticks, display_time) in zip(files, pts):
             absolute = float(int(ticks) * time_base) if time_base is not None else float(display_time)
@@ -182,6 +186,8 @@ class Media:
                 step(self.index, "sheets", "unavailable", "Use the indexed individual frames.")
         self.index["sampling"] = {"mode":mode, "interval_seconds":interval if mode=="inspect" else None,
                                  "requested_seconds":selection, "labels_on_images":labeled}
+        if requested_pts is not None:
+            self.index["sampling"]["requested_pts"] = requested_pts
         step(self.index, "visual", "ok", f"{len(files)} source-timed images.")
 
     def audio(self, selection=None):
@@ -193,7 +199,7 @@ class Media:
         if selection:
             lo, hi = selection
             prefix = f"atrim=start={lo+self.origin:.9f}:end={hi+self.origin:.9f},"
-        filters = (prefix + "asplit=2[signal][clock];[clock]atrim=end_sample=1,ashowinfo,anullsink;"
+        filters = (prefix + "asplit=2[signal][clock];[clock]atrim=end_sample=1,asettb=1/sr,ashowinfo,anullsink;"
                    "[signal]asetpts=PTS-STARTPTS,aresample=16000:async=1:first_pts=0")
         _, log = self.ffmpeg(self.input_args() + ["-map", f"0:{stream['index']}", "-vn", "-sn", "-dn", "-af", filters,
                                                    "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "audio.wav"])
@@ -203,10 +209,10 @@ class Media:
                 duration = wav.getnframes() / wav.getframerate()
         except (OSError, EOFError, wave.Error) as exc:
             raise MediaError("Extracted audio could not be read.") from exc
-        match = re.search(r"ashowinfo[^\n]*?\bpts_time:([-\deE+.]+)", log)
-        if not match or duration <= 0:
+        match = re.search(r"ashowinfo[^\n]*?\bpts:(-?\d+)\b[^\n]*?\brate:(\d+)\b", log)
+        if not match or int(match[2]) == 0 or duration <= 0:
             raise MediaError("No timed audio samples decoded in the requested interval.")
-        start = float(match[1]) - self.origin
+        start = float(Fraction(int(match[1]), int(match[2])) - Fraction(str(self.origin)))
         span = {"file":"audio.wav","start":round(start,9),"end":round(start+duration,9),
                 "duration":duration,"method":"first decoded sample PTS plus WAV sample count"}
         self.index["audio_excerpt"] = span
@@ -264,7 +270,7 @@ class Media:
             # Default to a navigable overview on long material, retaining detected changes.
             duration = self.index["streams"].get("video", {}).get("duration") or 0
             interval = getattr(args, "interval", None) or max(1, math.ceil(duration / 120))
-            self.attempt("visual", self.visuals, mode, selection, interval)
+            self.attempt("visual", self.visuals, mode, selection, interval, getattr(args, "pts", None))
         if mode == "audio" or (mode == "inspect" and not args.visual_only):
             self.attempt("audio", self.audio, selection)
             if mode == "inspect" and not args.no_asr:
@@ -285,9 +291,17 @@ def main():
             cmd.add_argument("--interval", type=seconds, help="Overview sampling interval in seconds")
             cmd.add_argument("--no-asr", action="store_true", help="Prepare audio without transcription")
             cmd.add_argument("--visual-only", action="store_true", help="Skip audio extraction and ASR")
+        elif mode == "still":
+            position = cmd.add_mutually_exclusive_group(required=True)
+            position.add_argument("time", type=seconds, nargs="?", metavar="SECONDS",
+                                  help="Select the first frame at or after this playback time")
+            position.add_argument("--pts", type=int, metavar="TICKS",
+                                  help="Select the exact integer pts from this video's frame index")
         else:
-            cmd.add_argument("times", type=seconds, nargs=1 if mode == "still" else 2, metavar="SECONDS")
+            cmd.add_argument("times", type=seconds, nargs=2, metavar="SECONDS")
     args = parser.parse_args()
+    if args.mode == "still" and args.time is not None:
+        args.times = [args.time]
     if getattr(args, "interval", None) == 0:
         parser.error("--interval must be positive")
     times = getattr(args, "times", [])

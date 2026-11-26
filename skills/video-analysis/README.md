@@ -70,7 +70,7 @@ Open the second result’s sheet and read its six frames left to right, top to b
 
 | What you see | What to check |
 | --- | --- |
-| A brief insert or small caption is hard to read | Use `window` for consecutive frames across the cut. Use `still` at one of the indexed times for a native-resolution image. |
+| A brief insert or small caption is hard to read | Use `window` for consecutive frames across the cut. To reopen an exact frame at native resolution, use `still INPUT --pts TICKS --out DIR`, taking `TICKS` from that frame’s integer `pts` in the same video’s index. |
 | The picture is usable but a transcript is missing | Read `steps.asr` in the index and run `check` with your private settings. Verify the whisper.cpp executable and model. Use `inspect --no-asr` to keep the audio or `inspect --visual-only` for picture alone. |
 | The spoken line seems late or early | Read `cues.json` for playback times. The raw subtitles use the extracted audio clock. For a closer listen, `audio` extracts a selected interval and records its start time in the index. |
 
