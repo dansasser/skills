@@ -295,6 +295,7 @@ def _job(a, outs):
     from .scene import validate_scene
     from .resources import JobPlan
 
+    limits.reraise_latched()                         # an import callback may have consumed a stop
     util.seed(a.seed)
     limits.stage("scene build")
     spec = importlib.util.spec_from_file_location("scene_module", a.scene)
@@ -303,6 +304,7 @@ def _job(a, outs):
     scene_bytes = _scene_bytes(a)
     mod = importlib.util.module_from_spec(spec)
     exec(compile(scene_bytes, spec.origin, 'exec'), mod.__dict__)
+    limits.reraise_latched()
     sc = mod.build()
     limits.reraise_latched()                         # a limit hit in a scene thread, or caught by the scene
     validate_scene(sc)                              # reject unsupported inputs before rendering buffers
@@ -401,9 +403,22 @@ def _renderer(a, budget, wfd, parent):
         except OSError:
             pass
 
+    class RequestedStop(SystemExit):
+        """Cancellation delivered by this renderer's SIGTERM handler."""
+
+    previous_hook = sys.unraisablehook
+
+    def report_unraisable(error):
+        # Python cannot propagate an exception out of a weakref callback.
+        # Our stop is already latched. Report all other callback errors normally.
+        if error.exc_type is not RequestedStop:
+            previous_hook(error)
+
+    sys.unraisablehook = report_unraisable
+
     def _terminate(signum, frame):                   # --stop, or the supervisor going away
         budget.interrupted = True                    # remembered, in case the scene file swallows it
-        limits.raise_or_hold(SystemExit(143))
+        limits.raise_or_hold(RequestedStop(143))
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGINT, signal.SIG_IGN)     # Ctrl-C is the supervisor's to pass on, as a request to stop
     signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)    # held by the supervisor across the fork
