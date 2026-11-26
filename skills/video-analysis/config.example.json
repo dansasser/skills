@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "env_file": ".env",
+  "tools": {
+    "ffprobe": "ffprobe",
+    "ffmpeg": "ffmpeg"
+  },
+  "asr": {
+    "backend": "whisper.cpp",
+    "executable": "whisper-cli",
+    "model_path": "./models/ggml-medium.en.bin",
+    "language": "en"
+  },
+  "tts": {
+    "base_url": "https://speech.example.invalid/v1",
+    "model": "example-model",
+    "api_key_env": "VIDEO_TTS_API_KEY"
+  }
+}
