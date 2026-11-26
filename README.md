@@ -8,6 +8,7 @@ Reusable agent skills published by **Dan Sasser**. Each skill is a self-containe
 | --- | --- | --- | --- |
 | [Mesh Painting](skills/mesh-painting/README.md) | Paint editable landscapes, coasts and buildings with triangle meshes and brushstrokes, without an image-generation model | Linux, Python 3.10+, NumPy, SciPy, Pillow; optional C compiler | [MIT](skills/mesh-painting/LICENSE) |
 | [Graph Development](skills/graph-development/README.md) | Build and operate bounded software-development lifecycle graphs with specification, approval, execution and recovery lineage | Linux, Python 3.12+; standard library | [Apache-2.0](skills/graph-development/LICENSE) |
+| [Video Analysis](skills/video-analysis/README.md) | Examine a cut or compare reels to identify recurring editing choices, with timestamps for the visual and audio evidence | Linux, Python 3, FFmpeg and ffprobe. Optional whisper.cpp for transcription | [MIT](skills/video-analysis/LICENSE) |
 
 ## Install a skill
 
